@@ -1,0 +1,732 @@
+---
+title: "Generating clustering plots"
+author: "Mohamed Nadhir Djekidel"
+date: "July 26, 2017"
+output: html_document
+---
+
+
+## Introduction 
+In these scripts, I am to generate publishable figures for the figures.
+
+```{r}
+load("results_NAc_all/NAc_cells_all.RData")
+```
+
+## Remove double-droplet cells from the NAc
+
+```{r}
+identToUse <- setdiff(unique(NAc_cells_all@ident),c("Astro_2",
+                                                    "Micro_2","Micro_5",
+                                                    "Oligo_2","Oligo_8",
+                                                    "IN_2","IN_3","IN_7",
+                                                    "oNeuro_1","oNeuro_2"))
+
+NAc_cells_all_filtered <- SubsetData(NAc_cells_all,ident.use = identToUse)
+
+NAc_cells_all_filtered <- ScaleData(NAc_cells_all_filtered)
+```
+
+
+## Order cells by type 
+
+```{r}
+NAc_cells_all_filtered <- MeanVarPlot(NAc_cells_all_filtered, x.low.cutoff = 0.1, #fxn.x = meanNoExp,
+                    y.cutoff = 1, do.contour = F,do.recalc = TRUE, 
+                    cex.use=0.2, cex.text.use=0.5)
+
+NAc_cells_all_filtered@var.genes <- unique(c(NAc_cells_all_filtered@var.genes,markers_names))
+
+NAc_cells_all_filtered <- PCA(NAc_cells_all_filtered, pc.genes = NAc_cells_all_filtered@var.genes ,do.print = F)
+
+NAc_cells_all_filtered <- RunTSNE(NAc_cells_all_filtered,dims.use = 1:15,
+                                  dim_embed = 2,perplexity=50,do.fast = T)
+```
+
+
+## Types colors 
+
+```{r, fig.height=10, fig.width=12}
+AllClustIdent <- as.character(NAc_cells_all_filtered@ident)
+
+newIdent <- gsub("_\\d+","",AllClustIdent)
+newIdent[newIdent == "oNeuro"] <- "D1"
+
+NAc_cells_all_filtered <- SetIdent(NAc_cells_all_filtered,ident.use = newIdent)
+
+Astro_type_col <-  pal_material(palette = "grey")(10)[5]
+D1_type_col <- pal_material(palette = "pink")(10)[5]
+D2_type_col <- pal_material(palette = "purple")(10)[5]
+Endo_type_col <- pal_material(palette = "blue")(10)[5]
+IN_type_col <- pal_material(palette = "orange")(10)[5]
+Micro_type_col <- pal_material(palette = "green")(10)[5]
+NB_type_col <- pal_material(palette = "lime")(10)[5]
+Oligo_type_col <- pal_material(palette = "yellow")(10)[5]
+OPC_type_col <- pal_d3()(10)[6]
+  #pal_material(palette = "amber")(10)[6]
+oNeuro_type_col <- pal_material(palette = "brown")(10)[5]
+
+Types_cols <- c(Astro_type_col,D1_type_col,D2_type_col,
+                Endo_type_col,IN_type_col,Micro_type_col,
+                NB_type_col,Oligo_type_col,OPC_type_col)
+
+names(Types_cols) <- unique(newIdent)
+
+
+#clus_lvls <- c("Oligo","Astro","Endo","Micro","D2","D1","oNeuro","IN","NB")
+clus_lvls <- c("Oligo","Astro","Endo","Micro","D1","D2","IN","NB")
+
+plottSNEClustering(NAc_cells_all_filtered,Types_cols, clusLevels = NULL)
+```
+
+
+## All Cluster Colors 
+
+```{r}
+nbAstro <- length(grep("Astro",levels(NAc_cells_all_filtered@ident)))
+Astro_cols <- pal_material(palette = "red")(length(grep("Astro",levels(NAc_cells_all_filtered@ident)))+1)[-1]
+D1_cols <- pal_material(palette = "pink")(length(grep("D1",levels(NAc_cells_all_filtered@ident)))+1)[-1]
+D2_cols <- pal_material(palette = "deep-purple")(length(grep("D2",levels(NAc_cells_all_filtered@ident)))+1)[-1]
+Endo_cols <- pal_material(palette = "blue")(length(grep("Endo",levels(NAc_cells_all_filtered@ident)))+1)[-1]
+
+nbIN <- length(grep("IN_",levels(NAc_cells_all_filtered@ident)))
+IN_cols <-colorRampPalette(pal_material(palette = "cyan")(10))(nbIN+1)[-1]
+Micro_cols <- pal_material(palette = "green")(length(grep("Micro_",levels(NAc_cells_all_filtered@ident)))+1)[-1]
+NB_cols <- pal_material(palette = "lime")(length(grep("NB_",levels(NAc_cells_all_filtered@ident)))+1)[-1]
+Oligo_cols <- pal_material(palette = "yellow")(length(grep("Oligo_",levels(NAc_cells_all_filtered@ident)))+1)[-1]
+oNeuro_cols <- pal_material(palette = "brown")(length(grep("oNeuro",levels(NAc_cells_all_filtered@ident))))
+
+
+AllClustCols <- c(Astro_cols,D1_cols,D2_cols,Endo_cols,IN_cols, Micro_cols,NB_cols, Oligo_cols, oNeuro_cols)
+names(AllClustCols) <- levels(NAc_cells_all_filtered@ident)
+```
+
+
+
+
+
+
+## Global markers
+
+```{r}
+all_markers <- FindAllMarkers(NAc_cells_all_filtered,thresh.use = 1,test.use = "roc",only.pos = T,do.print = T)
+all_markers$FC <- log2((all_markers$pct.1+0.000001)/(all_markers$pct.2+0.000001))
+
+all_markers.sig <- subset(all_markers, power > 0.7 & pct.1 > 0.7 & pct.2 < 0.2)
+
+all_markers.sig$cluster <- factor(all_markers.sig$cluster,levels = clus_lvls,ordered = T)
+
+all_markers.sig_top5 <- data.frame()
+
+for(cls in levels(all_markers.sig$cluster)){
+  tmp <- subset(all_markers.sig, cluster == cls)
+  tmp <- tmp[order(tmp$FC,decreasing = T),]
+  
+  if(nrow(tmp)>10 & cls=="Oligo"){
+    tmp <- subset(tmp,pct.1 > 0.8)
+  }
+  
+  all_markers.sig_top5 <- rbind(all_markers.sig_top5,head(tmp,5))
+}
+
+
+all_markers.sig_top5 <- subset(all_markers.sig_top5, !gene %in% c("Nxph1","Olfm2","Pllp","Gatm","Gpr6","Resp18"))
+
+all_markers.sig_top5 <- subset(all_markers.sig_top5,cluster != "oNeuro")
+
+mrks2 <- all_markers.sig_top5$gene
+#mrks2 <- gsub("Lrpprc","Foxp2",mrks2)
+
+pdf("results_NAc_all/NAc_cells_all_filtered/markers_heatmap_all_split_top5_small.pdf",width=10,height = 6,compress = TRUE)
+plotMarkersHeatmap(NAc_cells_all_filtered,
+                   markers = mrks2, #all_markers.sig_top5$gene, 
+                   clustersColors = Types_cols,
+                   markerClusters = all_markers.sig_top5$cluster, 
+                   identlevels = clus_lvls,
+                   clusterCols = FALSE)
+dev.off()
+
+
+
+
+png("results_NAc_all/Figures/markers_heatmap_all_split_top5.png",width=2048/2,height = 1024/2)
+plotMarkersHeatmap(NAc_cells_all_filtered,
+                   markers = mrks2, 
+                   clustersColors = Types_cols,
+                   markerClusters = all_markers.sig_top5$cluster, 
+                   identlevels = clus_lvls,
+                   clusterCols = FALSE)
+dev.off()
+```
+
+## Plot Violin plot
+
+```{r}
+GeneralMarkers <- c()
+
+idents <- factor(as.character(NAc_cells_all_filtered@ident),levels = clus_lvls,ordered = T)
+
+plt= MarkerViolonPlot(feature = c("Enpp2","Gja1","Slc22a8","Ctss",
+                             "Snap25","Ppp1r1b",
+                             "Pdyn","Adora2a",
+                             #"Lrpprc",
+                             "Elavl2","Top2a"),
+                 sobj =  NAc_cells_all_filtered,
+                 cell.ident = idents,
+                 do.sort = F,cols.use = Types_cols,inGrid = T)
+
+plt + theme(panel.spacing = unit(0,"npc"),strip.background = element_blank(),axis.text =   element_text(colour = "black",face = "bold"), strip.text = element_text(face = "bold",colour = "black")) + ylab("log(CPM+1)")
+
+```
+
+
+## Check that there is no cofounder variables
+
+```{r}
+require(scater)
+NAc_cells_all_filtered <- SetIdent(NAc_cells_all_filtered,ident.use = AllClustIdent)
+
+NAc_cells_all_filtered <- SetSamplesLabels(NAc_cells_all_filtered)
+
+pheno_data <- NAc_cells_all_filtered@data.info[,c("nGene","nUMI","Sample","treatment","Period")]
+
+pheno_data$treatment_period <- paste0(pheno_data$treatment,pheno_data$Period)
+
+pheno_data$cluster <- NAc_cells_all_filtered@ident
+
+pheno_data <- new("AnnotatedDataFrame", anno)
+rownames(pheno_data) <- pheno_data$sample_id
+umi <- scater::newSCESet(
+    countData = NAc_cells_all_filtered@data,
+    phenoData = pheno_data
+)
+
+```
+
+
+### Get Inter-neurons
+
+```{r}
+NAc_cells_all_filtered <- SetIdent(NAc_cells_all_filtered,ident.use = AllClustIdent)
+
+pos <- grep("IN_",as.character(NAc_cells_all_filtered@ident))
+NAc_neuros_IN <- SubsetData(NAc_cells_all_filtered,cells.use = NAc_cells_all_filtered@cell.names[pos])
+
+NAc_neuros_IN<-  MeanVarPlot(NAc_neuros_IN, x.low.cutoff = 0.5, #fxn.x = meanNoExp,
+                    y.cutoff = 1, do.contour = F,do.recalc = TRUE, 
+                    cex.use=0.2, cex.text.use=0.5)
+
+
+NAc_neuros_IN <- PCA(NAc_neuros_IN, pc.genes = NAc_neuros_IN@var.genes ,do.print = F)
+
+NAc_neuros_IN <- RunTSNE(NAc_neuros_IN,dims.use = 1:10,
+                                  dim_embed = 2,perplexity=100,exaggeration_factor=30,do.fast = T) 
+
+
+NAc_neuros_IN_mrk <- FindAllMarkers(NAc_neuros_IN,thresh.use = log2(1.5),test.use = "roc",only.pos = T,do.print = T)
+NAc_neuros_IN_mrk$FC <- (NAc_neuros_IN_mrk$pct.1+0.00001)/(NAc_neuros_IN_mrk$pct.2+0.00001)
+
+NAc_neuros_IN_mrk.sig1 <- data.frame()
+
+for(cls in unique(NAc_neuros_IN_mrk$cluster)){
+  m <- subset(NAc_neuros_IN_mrk, cluster == cls & power>0.7 & pct.1 > 0.7 & pct.2 < 0.2)
+  if(nrow(m)==0){
+    m <- head(subset(NAc_neuros_IN_mrk, cluster == cls),5)
+  }else{
+    m <- m[order(m$FC,decreasing = T),]
+    m <- head(m,5)
+  }
+  
+  print(dim(m))
+  NAc_neuros_IN_mrk.sig1 <- rbind(NAc_neuros_IN_mrk.sig1,m)
+}
+
+IN_cols1 <- c(pal_nejm()(8), pal_npg()(5))
+names(IN_cols1) <- levels(NAc_neuros_IN@ident)
+
+
+gns1 <- c("Chat","Ntrk1","Prima1","C130060K24Rik",  #NAc_neuros_IN_mrk.sig1$gene[1:5], #IN_1
+          "Maf","Pthlh", #IN_4
+          "Pvalb", #IN_5
+          "Crhbp",  #IN_6
+          "Pcdh11x",# IN_8
+          "Th","Trh", #IN_9
+          "Calb2",#IN_10
+          "Afap1",#IN_11
+          "Hhip",#IN_12
+          "Sst","Npy",#IN_13
+          "Meis2",#IN_14
+          "Tmem215",#IN_15
+          "Nrgn"#IN_16
+)
+        
+
+gns1_2 <- c("Afap1",#IN_11
+          "Maf","Pthlh", #IN_4
+          "Pvalb", #IN_5
+          "Crhbp",  #IN_6
+          "Chat","Ntrk1","Prima1","C130060K24Rik",  #NAc_neuros_IN_mrk.sig1$gene[1:5], #IN_1
+          "Hhip",#IN_12
+          "Sst","Npy",#IN_13
+          "Meis2",#IN_14
+          "Tmem215",#IN_15
+          "Nrgn",#IN_16
+          "Pcdh11x",# IN_8
+          "Th","Trh", #IN_9
+          "Calb2" #IN_10
+)  
+      
+gns2 <- c("Chat","Pvalb","Sst","Th","Calb2","Lhx6")    
+
+
+plotMarkersHeatmap(NAc_neuros_IN,
+                   markers = gns1_2,
+                   clustersColors = IN_cols1,
+                   #markerClusters = NAc_neuros_IN_mrk.sig1$cluster, 
+                   #identlevels = clus_lvls,
+                   clusterCols = FALSE)
+```
+
+
+## Try plot signal 
+
+
+```{r}
+IN_lvls <- gsub("IN_","",levels(NAc_neuros_IN@ident))
+IN_lvls <- sort(as.numeric(IN_lvls))
+IN_lvls <-  paste0("IN_",IN_lvls)
+
+plotClustersMarkersSignal(NAc_neuros_IN,gns1,cls_levels = IN_lvls)
+
+```
+
+## Highlighy inter-neurons in the global tSNE plot
+
+```{r}
+IN_clusts <- unique(grep("IN_",as.character(NAc_cells_all_filtered@ident),value = T))
+
+```
+
+## Study differentially expressed genes in Chat, Th and Sst clusters
+
+
+
+```{r}
+
+NAc_neuros_IN@raw.data <- NAc_neuros_IN@data[rownames(NAc_neuros_IN@data),colnames(NAc_neuros_IN@data)]
+
+IN_newIdent <- as.character(NAc_neuros_IN@ident)
+IN_newIdent[IN_newIdent == "IN_13"] <- "IN_12"
+
+NAc_neuros_IN <- SetIdent(NAc_neuros_IN,ident.use = IN_newIdent)
+
+NAc_neuros_IN <- BuildClusterTree(NAc_neuros_IN,do.reorder =T,reorder.numeric = F)
+
+NAc_neuros_IN@data.info$tree.ident <- as.character(NAc_neuros_IN@ident)
+clust_IN_DEG <- list()
+
+
+for(clus in c("IN_1","IN_9","IN_12") ){
+  clust_IN_DEG[[clus]] <- list()
+  for(period in unique(NAc_neuros_IN@data.info$Period)){
+    message(paste("cluster",clus,"period",period))
+    clust_IN_DEG[[clus]][[period]] <- list()
+    smp_saline <- rownames(subset(NAc_neuros_IN@data.info, Period == period & treatment == "Saline" & tree.ident== clus))
+    smp_cocaine <- rownames(subset(NAc_neuros_IN@data.info, Period == period & treatment == "Cocaine" & tree.ident== clus))
+    
+    
+    if(length(smp_saline)>1 & length(smp_cocaine)>1){
+      clust_IN_DEG[[clus]][[period]] = getMASTmarkers.group(NAc_neuros_IN,smp_saline,smp_cocaine)
+    }
+}
+}
+
+save(clust_IN_DEG,file = "results_NAc_all/Neuronal/Inter-neurons/Markers_Chat_Th_Sst/clust_IN_DEG.RData")
+save(NAc_neuros_IN,file = "results_NAc_all/Neuronal/Inter-neurons/Markers_Chat_Th_Sst/NAc_neuros_IN.RData")
+save(NAc_neuros_IN_mrk,file = "results_NAc_all/Neuronal/Inter-neurons/Markers_Chat_Th_Sst/NAc_neuros_IN_mrk.RData")
+```
+
+
+##
+```{r}
+
+dir.create("results_NAc_all/Neuronal/Inter-neurons/Markers_Chat_Th_Sst",showWarnings = FALSE)
+dir.create("results_NAc_all/Neuronal/Inter-neurons/Markers_Chat_Th_Sst/DEG_results_MAST_4FC/",showWarnings = FALSE)
+dir.create("results_NAc_all/Neuronal/Inter-neurons/Markers_Chat_Th_Sst/DEG_results_MAST_4FC/Maintenance",showWarnings = FALSE)
+dir.create("results_NAc_all/Neuronal/Inter-neurons/Markers_Chat_Th_Sst/DEG_results_MAST_4FC/withdraw_48h",showWarnings = FALSE)
+dir.create("results_NAc_all/Neuronal/Inter-neurons/Markers_Chat_Th_Sst/DEG_results_MAST_4FC/withdraw_15d",showWarnings = FALSE)
+
+clust_IN_DEGrootDir <- "results_NAc_all/Neuronal/Inter-neurons/Markers_Chat_Th_Sst/DEG_results_MAST_4FC"
+
+for(clus in names(clust_IN_DEG)){
+  for(period in names(clust_IN_DEG[[clus]])){
+    fout <-file.path(clust_IN_DEGrootDir,period,paste0("cluster_",clus,"DEG_4FC_001.csv"))
+    
+    if(class(clust_IN_DEG[[clus]][[period]]) == "data.frame"){
+      
+      smp_saline <- rownames(subset(NAc_neuros_IN@data.info, Period == period & treatment == "Saline" & tree.ident== clus))
+      smp_cocaine <- rownames(subset(NAc_neuros_IN@data.info, Period == period & treatment == "Cocaine" & tree.ident== clus))
+      
+      data.1=apply(as.matrix(NAc_neuros_IN@data[clust_IN_DEG[[clus]][[period]]$Gene,smp_saline, drop = F]),1,expMean)
+      data.2=apply(as.matrix(NAc_neuros_IN@data[clust_IN_DEG[[clus]][[period]]$Gene,smp_cocaine, drop = F]),1,expMean)
+      total.diff=(data.1-data.2) 
+    
+      pos <- which(is.nan(clust_IN_DEG[[clus]][[period]]$log2FC))
+      if(length(pos) > 0){
+          clust_IN_DEG[[clus]][[period]]$log2FC[pos] <- total.diff[pos]  
+      }
+      clust_IN_DEG[[clus]][[period]]$emp_log2FC <- abs(clust_IN_DEG[[clus]][[period]]$emp_log2FC) * sign(clust_IN_DEG[[clus]][[period]]$log2FC)
+      
+      
+      deg <- subset(clust_IN_DEG[[clus]][[period]], pvalue < 0.01 & abs(log2FC) > log2(2) & abs(emp_log2FC) > log2(1) )
+      write.csv(deg, fout, row.names = FALSE)
+      
+      #write.csv(clust_IN_DEG[[clus]][[period]],file = fout,row.names = FALSE)
+    }
+  }
+}
+
+```
+
+
+## Plot heatmap of the diffrentially expressed genes
+```{r}
+top_deg <- 100
+
+for(clus in names(clust_IN_DEG)){
+  for(period in names(clust_IN_DEG[[clus]])){
+    
+    if(class(clust_IN_DEG[[clus]][[period]]) == "data.frame"){
+      message(paste("Processing cluster",clus,"period:", period))
+      
+    
+      deg <- subset(clust_IN_DEG[[clus]][[period]], pvalue < 0.01 & abs(log2FC) > log2(2) & abs(emp_log2FC) > log2(1))
+      if(nrow(deg) > 0){
+        deg <- head(deg,top_deg)
+        
+        smp_saline <- rownames(subset(NAc_neuros_IN@data.info, Period == period & treatment == "Saline" & tree.ident== clus))
+        smp_cocaine <- rownames(subset(NAc_neuros_IN@data.info, Period == period & treatment == "Cocaine" & tree.ident== clus))
+      
+        
+        fout <-file.path(clust_IN_DEGrootDir,period,paste0("cluster_",clus,"_FC4_001.heatmap.pdf"))
+        pdf(fout,width = 8,height = max(0.3*nrow(deg),15))
+        ph <- plotBetweenTreatmentHeatmap(sobj = NAc_neuros_IN,
+                                    cells1 = smp_saline,
+                                    cells2 = smp_cocaine,
+                                    types = c("Saline","Cocaine"),
+                                    colors = ggsci::pal_aaas()(2),
+                                    genes.use = deg$Gene,useCheatmap = T)
+        dev.off()
+        
+       ## Get a Saurat object that contains only interest cells
+         
+       sobj_tmp <- SubsetData(NAc_neuros_IN, cells.use = c(smp_saline,smp_cocaine))   
+       sobj_tmp <- SetIdent(sobj_tmp,ident.use = c(rep("Saline",length(smp_saline)),
+                                                rep("Cocaine",length(smp_cocaine)))
+                         )
+        
+        fout <-file.path(clust_IN_DEGrootDir,period,paste0("cluster_",clus,"violon.pdf"))
+        
+        if(!is.null(ph) & class(ph) != "Heatmap"){
+          deg <- deg[ph$tree_row$order,]
+        }
+        
+        nrowG <- ceiling(nrow(deg)/4)
+        
+        MarkerViolonPlot(sobj_tmp,features = deg$Gene,
+                         cell.ident = sobj_tmp@ident, cols.use = pal_aaas()(2),
+                         add.jitter = T,nrow = nrowG)
+        ggsave(fout,width = 8,height = max(0.3*nrow(deg),15))
+      }
+    }
+  }
+}
+```
+
+
+
+## Plot statistics
+
+```{r}
+getDEGStats(clust_DEG = clust_IN_DEG,
+            ttl = "Sensitivity of Inter-neurons sub-populations to Cocain treatment\n(FC=Saline/Cocaine, pval < 0.01 and FC>2)",
+            p.val = 0.01,
+            FC = log2(2),
+            emp_FC = log2(1.3))
+
+```
+
+## Plot a heatmap throught the different stages
+
+```{r}
+top_deg <- 100
+
+clus_genes <- list()
+
+IN_DEG_heatmaps <- list() 
+
+for(clus in names(clust_IN_DEG)){
+  #sobj_condition[[clus]] <- list()
+  clus_genes[[clus]] <- c()
+  IN_DEG_heatmaps[[clus]] <- list()
+  
+  for(period in names(clust_IN_DEG[[clus]])){
+    if(class(clust_IN_DEG[[clus]][[period]]) == "data.frame"){
+      message(paste("Processing cluster",clus,"period:", period))
+      
+      pos <- which(is.na(clust_IN_DEG[[clus]][[period]]$log2FC))
+      clust_IN_DEG[[clus]][[period]]$log2FC[pos] <- clust_IN_DEG[[clus]][[period]]$emp_log2FC[pos]
+      
+      deg <- subset(clust_IN_DEG[[clus]][[period]], pvalue < 0.01 &  abs(log2FC) > log2(2) & abs(emp_log2FC) > log2(1))
+      
+      if(nrow(deg) > 1){
+        deg <- head(deg,top_deg)
+      }else{
+        deg <- subset(clust_IN_DEG[[clus]][[period]], pvalue < 0.01 & abs(log2FC) > log2(4) & abs(emp_log2FC) > log2(1.5))
+        deg <- head(deg,top_deg)
+      }
+        
+        #clus_genes[[clus]] <- unique(c(clus_genes[[clus]],deg$Gene))
+        
+        smp_saline <- rownames(subset(NAc_neuros_IN@data.info, Period == period & treatment == "Saline" & tree.ident== clus))
+        smp_cocaine <- rownames(subset(NAc_neuros_IN@data.info, Period == period & treatment == "Cocaine" & tree.ident== clus))
+        
+        
+        
+       IN_DEG_heatmaps[[clus]][[period]] <- plotBetweenTreatmentHeatmap(sobj = NAc_neuros_IN,
+                                    cells1 = smp_saline,
+                                    cells2 = smp_cocaine, 
+                                    types = c("Saline","Cocaine"),
+                                    colors = pal_aaas()(2),
+                                    genes.use =deg$Gene ,
+                                  useCheatmap = T)
+       
+        
+        sobj_tmp <- SubsetData(NAc_neuros_IN, cells.use = c(smp_saline,smp_cocaine))   
+        sobj_tmp <- SetIdent(sobj_tmp,ident.use = c(rep("Saline",length(smp_saline)),
+                                                 rep("Cocaine",length(smp_cocaine))))
+        
+        nrowG <- ceiling(nrow(deg)/4)
+         
+         MarkerViolonPlot(sobj_tmp,features = deg$Gene,
+                          cell.ident =sobj_tmp@ident, cols.use = rep(pal_aaas()(2),3),
+                          add.jitter = T,nrow = nrowG)
+        
+                            
+                            
+      
+    }
+  }
+}
+
+
+
+DE_genes_cpt <- data.frame()
+
+for(clus in names(clust_IN_DEG)){
+  for(period in names(clust_IN_DEG[[clus]])){
+      pos <- which(is.na(clust_IN_DEG[[clus]][[period]]$log2FC))
+      clust_IN_DEG[[clus]][[period]]$log2FC[pos] <- -clust_IN_DEG[[clus]][[period]]$emp_log2FC[pos]
+      
+      deg_up <- subset(clust_IN_DEG[[clus]][[period]], pvalue < 0.01 & log2FC > log2(1.3))
+      deg_down <- subset(clust_IN_DEG[[clus]][[period]], pvalue < 0.01 & log2FC < -log2(1.3))
+      
+      
+      df <- data.frame(cellype=clus, period=period,
+                       nbGenes=c(nrow(deg_up),-nrow(deg_down)),
+                       direction=c("Up","Down"))
+      
+      DE_genes_cpt <- rbind(DE_genes_cpt,df)
+  }
+}
+
+
+DE_genes_cpt$cellype <- as.character(DE_genes_cpt$cellype)
+DE_genes_cpt$cellype <- gsub("IN_12","Sst",DE_genes_cpt$cellype)
+DE_genes_cpt$cellype <- gsub("IN_1","Chat",DE_genes_cpt$cellype)
+DE_genes_cpt$cellype <- gsub("IN_9","Th",DE_genes_cpt$cellype)
+
+
+DE_genes_cpt$cellype <- factor(DE_genes_cpt$cellype)
+
+ggplot(DE_genes_cpt, aes(x=period,fill=direction))+ 
+  geom_bar(data=subset(DE_genes_cpt,direction == "Up"),aes(y=nbGenes),width=0.3, stat = "identity", position = "dodge",color="black") +
+  geom_bar(data=subset(DE_genes_cpt,direction == "Down"),aes(y=nbGenes),width=0.3,stat = "identity", position = "dodge",color="black") +
+  geom_hline(yintercept = 0,colour = "black") + theme_bw() + scale_fill_lancet()+
+  facet_grid(cellype~.) + ylab("") +
+  theme(text = element_text(face = "bold",color = "black"),
+        axis.text = element_text(face = "bold",color = "black"), 
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold",color = "black",size = 16)
+        #panel.border = element_rect(colour = "black")
+        ) +
+  ggtitle("")
+  
+
+
+        
+  
+
+
+
+```
+
+
+
+## Find differential gene using Marker identification
+
+```{r}
+clust_IN_DEG2 <- list()
+for(clus in c("IN_1","IN_9","IN_12") ){
+  clust_IN_DEG2[[clus]] <- list()
+  for(period in unique(NAc_neuros_IN@data.info$Period)){
+    message(paste("cluster",clus,"period",period))
+    
+    clust_IN_DEG2[[clus]][[period]] <- list()
+    
+    smp_saline <- rownames(subset(NAc_neuros_IN@data.info, Period == period & treatment == "Saline" & tree.ident== clus))
+    smp_cocaine <- rownames(subset(NAc_neuros_IN@data.info, Period == period & treatment == "Cocaine" & tree.ident== clus))
+    
+    if(length(smp_saline)>1 & length(smp_cocaine)>1){
+      
+      sobj_tmp <- SubsetData(NAc_neuros_IN, cells.use = c(smp_saline,smp_cocaine))   
+      sobj_tmp <- SetIdent(sobj_tmp,ident.use = c(rep("Saline",length(smp_saline)),
+                                                rep("Cocaine",length(smp_cocaine)))
+                         )
+    
+      
+      clust_IN_DEG2[[clus]][[period]] = FindAllMarkers(sobj_tmp)
+    }
+  }
+}
+
+```
+
+
+## Use scDD to do DE
+
+```{r}
+require(scDD)
+prior_param=list(alpha=0.01, mu0=0, s0=0.01, a0=0.01, b0=0.01)
+
+
+clust_IN_DEG3 <- list()
+for(clus in c("IN_1","IN_9","IN_12") ){
+  clust_IN_DEG3[[clus]] <- list()
+  for(period in unique(NAc_neuros_IN@data.info$Period)){
+    message(paste("cluster",clus,"period",period))
+    
+    clust_IN_DEG3[[clus]][[period]] <- list()
+    
+    smp_saline <- rownames(subset(NAc_neuros_IN@data.info, Period == period & treatment == "Saline" & tree.ident== clus))
+    smp_cocaine <- rownames(subset(NAc_neuros_IN@data.info, Period == period & treatment == "Cocaine" & tree.ident== clus))
+    
+    if(length(smp_saline)>1 & length(smp_cocaine)>1){
+      
+      sobj_tmp <- SubsetData(NAc_neuros_IN, cells.use = c(smp_saline,smp_cocaine))   
+      sobj_tmp <- SetIdent(sobj_tmp,ident.use = c(rep("Saline",length(smp_saline)),
+                                                rep("Cocaine",length(smp_cocaine)))
+                         )
+    
+      
+      cd <- data.frame(condition = as.numeric(factor(sobj_tmp@data.info$treatment)),
+                       row.names = rownames(sobj_tmp@data.info))
+      
+      se <- SummarizedExperiment(assays=list(NormCounts=as.matrix(sobj_tmp@data)),
+                           colData=cd)
+      
+      
+      se <- scDD(se, prior_param=prior_param, testZeroes=TRUE,)
+
+      
+      clust_IN_DEG3[[clus]][[period]] = results(se)
+    }
+  }
+}
+
+
+```
+
+
+## Get neuronal cells Only 
+
+```{r}
+
+
+```
+
+
+# Plot expression of some markers
+
+## Ion channels
+
+```{r}
+Ion_channels <- c("Scnn1a","Scn9a","Scn8a","Scn7a","Scn4b","Scn3b","Scn3a","Scn2b","Scn2a1","Scn1b","Scn1a","Kcnv1","Kcnt2","Kcnt1","Kcns3","Kcns2","Kcns1","Kcnq5","Kcnq3","Kcnq2","Kcnn2","Kcnmb4","Kcnmb2","Kcnma1","Kcnk6","Kcnk4","Kcnk3","Kcnk2","Kcnk1","Kcnj9","Kcnj6","Kcnj4","Kcnj3","Kcnj2","Kcnj16","Kcnj11","Kcnj10","Kcnh7","Kcnh5","Kcnh1","Kcnf1","Kcnd3","Kcnd2","Kcnc4","Kcnc3","Kcnc2","Kcnc1","Kcnb2","Kcnb1","Kcnab3","Kcnab2","Kcnab1","Kcna6","Kcna4","Kcna3","Kcna2","Kcna1","Hcn3","Hcn1","Clns1a","Clic5","Clic4","Clic1","Clcn7","Clcn6","Clcn4.2","Clcn3","Clcn2","Clcc1","Clca2","Cacng5","Cacng4","Cacng3","Cacng2","Cacnb4","Cacnb3","Cacnb2","Cacna2d3","Cacna2d2","Cacna2d1","Cacna1i","Cacna1h","Cacna1g","Cacna1e","Cacna1d","Cacna1b","Cacna1a",
+"Cacna1f","Cacna1s","Cacna2d4","Cacnb1","Cacng1","Cacng6","Cacng7","Cacng8","Clca1","Clca3","Clca4","Clca5","Clca6","Clcn1","Clcn5","Clcnka","Clcnkb","Clic3","Clic6","Hcn2","Hcn4","Kcna5","Kcna7","Kcna10","Kcnd1","Kcne1","Kcne2","Kcne3","Kcne4","Kcng1","Kcng2","Kcng3","Kcng4","Kcnh2","Kcnh3","Kcnh4","Kcnh6","Kcnh8","Kcnj1","Kcnj12","Kcnj13","Kcnj14","Kcnj15","Kcnj5","Kcnj8","Kcnk5","Kcnk7","Kcnk9","Kcnk10","Kcnk12","Kcnk13","Kcnk15","Kcnk16","Kcnk18","Kcnmb1","Kcnmb3","Kcnn1","Kcnn3","Kcnn4","Kcnq1","Kcnq4","Kcnv2","Scn10a","Scn11a","Scn4a","Scn5a","Scnn1b","Scnn1g")
+
+Ion_channels_expressed = intersect(Ion_channels, rownames(NAc_cells_all_filtered@data))
+
+plt= MarkerViolonPlot(feature = Ion_channels_expressed,
+                 sobj =  NAc_cells_all_filtered,
+                 cell.ident = NAc_cells_all_filtered@ident,
+                 do.sort = F,
+                 x.lab.rot = TRUE,
+                 #cols.use = generateColors(length(levels(NAc_cells_all_filtered@ident))),
+                 inGrid = T)
+
+pdf("merFISH/Ion_channels.pdf",width = 15,height = 50)
+plt + theme(panel.spacing = unit(0,"npc"),strip.background = element_blank(),axis.text =   element_text(colour = "black",face = "bold"), strip.text = element_text(face = "bold",colour = "black")) + ylab("log(CPM+1)")
+dev.off()
+
+```
+
+
+## Neuro-transmiters
+
+```{r}
+Neuro_transmiters <- c("Htr7","Htr5b","Htr5a","Htr4","Htr3b","Htr3a","Htr2c","Htr2b","Htr2a","Htr1f","Htr1d","Htr1b","Htr1a","Hrh3","Hrh2","Hrh1","Glrb","Glra3","Glra2","Drd5","Drd1a","Cnr2","Cnr1","Chrnb3","Chrnb2","Chrnb1","Chrna7","Chrna6","Chrna5","Chrna4","Chrna3","Chrna2","Chrna1","Chrm4","Chrm3","Chrm2","Chrm1","Adrb2","Adrb1","Adra2a","Adra1d","Adra1b","Adra1a","Adora1","Grm8","Grm7","Grm5","Grm4","Grm3","Grm2","Grm1","Grina","Grin3a","Grin2d","Grin2b","Grin2a","Grin1","Grik5","Grik4","Grik3","Grik2","Grik1","Grid1","Gria4","Gria3","Gria2","Gria1","Gabrg3","Gabrg2","Gabrg1","Gabrd","Gabrb3","Gabrb2","Gabrb1","Gabra5","Gabra4","Gabra3","Gabra2","Gabra1","Gabbr2","Gabbr1",
+"Gabra6","Gabre","Gabrp","Gabrq","Gabrr1","Gabrr2","Gabrr3","Grid2","Grin3b","Grm6","Adora2a","Adora2b","Adora3","Adra2b","Adra2c","Adrb3","Chrm5","Chrna9","Chrna10","Chrnb4","Chrnd","Chrne","Chrng","Drd2","Drd3","Drd4","Glra1","Glra4","Grin2c","Hrh4","Htr")
+
+
+
+Neuro_transmiters_expressed = intersect(Neuro_transmiters, rownames(NAc_cells_all_filtered@data))
+
+plt= MarkerViolonPlot(feature = Neuro_transmiters_expressed,
+                 sobj =  NAc_cells_all_filtered,
+                 cell.ident = NAc_cells_all_filtered@ident,
+                 do.sort = F,
+                 x.lab.rot = TRUE,
+                 #cols.use = generateColors(length(levels(NAc_cells_all_filtered@ident))),
+                 inGrid = T)
+
+pdf("merFISH/Neuro_transmiters.PDF",width = 15,height = 50)
+plt + theme(panel.spacing = unit(0,"npc"),strip.background = element_blank(),axis.text =   element_text(colour = "black",face = "bold"), strip.text = element_text(face = "bold",colour = "black")) + ylab("log(CPM+1)")
+dev.off()
+
+```
+
+
+
+```{r}
+Neuropeptides_and_receptors <- c("Oxtr","Vipr2","Vipr1","Vip","Tacr3","Tacr2","Tacr1","Tac2","Tac1","Sstr4","Sstr3","Sstr2","Sstr1","Sst","Rxfp3","Rxfp1","Rln1","Insl6","Prokr2","Prok2","Oprl1","Pnoc","Oprk1","Pdyn","Oprm1","Oprd1","Penk","Npy5r","Npy2r","Npy1r","Npy","Ndnf","Grpr","Grp","Crhr2","Crhr1","Crh","Cckbr","Cckar","Cck","Adcyap1r1","Adcyap1","Rxfp2", "Rxfp4", "Sstr5")
+
+
+
+Neuropeptides_and_receptors_expressed = intersect(Neuropeptides_and_receptors, rownames(NAc_cells_all_filtered@data))
+
+plt= MarkerViolonPlot(feature = Neuropeptides_and_receptors_expressed,
+                 sobj =  NAc_cells_all_filtered,
+                 cell.ident = NAc_cells_all_filtered@ident,
+                 do.sort = F,
+                 x.lab.rot = TRUE,
+                 #cols.use = generateColors(length(levels(NAc_cells_all_filtered@ident))),
+                 inGrid = T)
+
+pdf("merFISH/Neuropeptides_and_receptors.PDF",width = 15,height = 50)
+plt + theme(panel.spacing = unit(0,"npc"),strip.background = element_blank(),axis.text =   element_text(colour = "black",face = "bold"), strip.text = element_text(face = "bold",colour = "black")) + ylab("log(CPM+1)")
+dev.off()
+
+```
+
+
+

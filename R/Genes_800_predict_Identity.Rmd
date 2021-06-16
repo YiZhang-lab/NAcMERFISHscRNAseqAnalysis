@@ -1,0 +1,131 @@
+---
+title: "Predict cells identity"
+author: "Mohamed Nadhir Djekidel"
+date: "July 14, 2017"
+output: html_document
+---
+
+We loaded the cells with 800 genes and predict their identity
+
+
+```{r}
+NAc_merged_sobj_800 <- PCA(NAc_merged_sobj_800, pc.genes = NAc_merged_noSample5_sobj@var.genes, pcs.store = 30, do.print = FALSE)
+NAc_merged_sobj_800 <- ProjectPCA(NAc_merged_sobj_800)
+NAc_merged_sobj_800 <- RunTSNE(NAc_merged_sobj_800, dims.use = 1:15, do.fast = T,dim_embed = 3)
+
+require(stringr)
+
+clustMarkers <- unique(as.character(sapply(NAc_merged_ClustersMarkers,function(x) head(rownames(x),100))))
+
+NAc_classifier <- BuildRFClassifier(NAc_merged_noSample5_sobj,
+                                    training.genes = clustMarkers,
+                                    training.classes = NAc_merged_noSample5_sobj@ident, probability=TRUE)
+
+#NAc_classifier_gbm <- buildRfClassifier(NAc_merged_noSample5_sobj,
+#                                        gene.to.use =  NAc_merged_noSample5_sobj@var.genes,
+#                                    )
+
+
+cell800_barcode <- as.character(str_match(colnames(NAc_merged_sobj_800@data),pattern = "[A|C|T|G]+\\.NAc_Sample\\w+"))
+cell1500_barcode <-as.character(str_match(colnames(NAc_merged_noSample5_sobj@data),pattern = "[A|C|T|G]+\\.NAc_Sample\\w+"))
+
+newCells <- setdiff(cell800_barcode,cell1500_barcode)
+
+newCells <- colnames(NAc_merged_sobj_800@data)[match(newCells,cell800_barcode)]
+
+NAc_new_cells_sobj <- SubsetData(NAc_merged_sobj_800,cells.use = newCells)
+
+
+NAc_new_cells_assignment <- PredictCellsIdentity(NAc_merged_noSample5_sobj,NAc_classifier,new.data = NAc_new_cells_sobj@data)
+
+
+if(class(NAc_new_cells_assignment) == "matrix"){
+  rownames(NAc_new_cells_assignment) <- colnames(NAc_new_cells_sobj@data)
+}
+
+maxProbs <- apply(NAc_new_cells_assignment,1,max)
+predClass <- apply(NAc_new_cells_assignment,1,which.max)
+
+maxPredictionsProbs <- data.frame(prob = maxProbs )
+
+ggplot(maxPredictionsProbs, aes(x=prob)) + geom_density(alpha=1,fill="royalblue2") + theme_bw() +
+  ggtitle("max identity prediction probabilities of\nthe newly added cells with 800 genes") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+NewCellsIdent <- as.numeric(colnames(NAc_new_cells_assignment)[predClass])
+
+newIdentities <- rep(0,length(NAc_merged_sobj_800@ident))
+
+PrevCellsPos <- match(cell1500_barcode,cell800_barcode)
+NewCellPos <- match(newCells, colnames(NAc_merged_sobj_800@data))
+
+newIdentities[PrevCellsPos] <- as.numeric(as.character( NAc_merged_noSample5_sobj@ident))
+newIdentities[NewCellPos] <-  NewCellsIdent
+
+
+
+NAc_merged_sobj_800 <- SetIdent(NAc_merged_sobj_800,ident.use = newIdentities)
+
+
+samplesColors_800 <- pal_d3(palette = "category20")(length(levels(NAc_merged_sobj_800@ident)))
+names(samplesColors_800) <- levels(NAc_merged_sobj_800@ident)
+
+plottSNEClustering3D(NAc_merged_sobj_800,samplesColors_800)
+```
+
+```{r}
+require(pROC)
+
+# do a one-versus all ROC
+
+for(clus in levels(NAc_merged_noSample5_sobj@ident)){
+  
+  classes <- as.character(NAc_merged_noSample5_sobj@ident)
+  classes[classes==clus]=1
+  classes[classes!=clus]=0
+  
+  
+}
+
+
+```
+
+
+## Remove double droplets (identified in the previous round)
+
+```{r}
+posDD1 <- colnames(NAc_NonNeuro_Clus_1_3_sobj@data)[NAc_NonNeuro_Clus_1_3_sobj@ident == "6"]
+rm(NAc_NonNeuro_Clus_1_3_sobj)
+posDD2 <- colnames(NAc_NonNeuro_Clus_10_11_sobj@data)[NAc_NonNeuro_Clus_10_11_sobj@ident %in% c("11","12")]
+rm(NAc_NonNeuro_Clus_10_11_sobj)
+posDD3 <- colnames(NAc_NonNeuro_Clus_12_13_sobj@data)[NAc_NonNeuro_Clus_12_13_sobj@ident %in% c("1")]
+rm(NAc_NonNeuro_Clus_10_11_sobj)
+
+doubleDroples <- c(posDD1,posDD2, posDD3)
+length(doubleDroples)
+```
+
+
+
+## get non-neuronal cells 
+
+```{r}
+nonNeuro <- which(newIdentities %in% c(1,2,3,9,10,11,12,13))
+
+nonNeuro_real <- setdiff(colnames(NAc_merged_sobj_800@data)[nonNeuro], doubleDroples)
+
+NAc_nonNeuro <- SubsetData(NAc_merged_sobj_800, cells.use = nonNeuro_real)
+NAc_nonNeuro
+```
+
+
+
+
+### Get the gene and UMI distribution in the new classed 
+
+
+```{r}
+prevCells_pos <- match(colnames(NAc_merged_sobj@data),colnames(NAc_merged_sobj_800@data))
+
+```

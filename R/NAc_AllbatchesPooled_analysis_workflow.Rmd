@@ -1,0 +1,1575 @@
+---
+title: "Pooled samples analysis"
+author: "Mohamed Nadhir Djekidel"
+date: "July 5, 2017"
+output: html_document
+---
+
+```{r}
+#require(cellrangerRkit)
+require(data.table)
+require(ggplot2)
+require(ggsci)
+require(plotly)
+require(RColorBrewer)
+require(stringr)
+require(Seurat)
+require(randomcoloR)
+require(reshape2)
+require(MAST)
+require(pheatmap)
+require(ComplexHeatmap)
+require(circlize)
+require(Rcpp)
+#require(SC3)
+source("utils.R")
+```
+
+
+## load samples
+
+
+```{r}
+#Consider only the saline samples
+cellRangerPaths <- list(NAc_Sample1="../NAc_sample1/",
+                        NAc_Sample2="../NAc_sample2/",
+                        NAc_Sample3="../NAc_sample3/",
+                        NAc_Sample4="../NAc_sample4/",
+                        #NAc_Sample5="../NAc_sample5/",
+                        NAc_Sample6="../NAc_sample6/",
+                        NAc_Sample7="../NAc_sample7/",
+                        NAc_Sample8="../NAc_sample8/",
+                        NAc_Sample9="../NAc_sample9",
+                        NAc_Sample10="../NAc_sample10/",
+                        NAc_Sample11="../NAc_sample11/", 
+                        NAc_Sample12="../NAc_sample12/"
+                        )
+
+cellRangersObjs <- list()
+
+
+for(smp in names(cellRangerPaths)){
+  message(smp)
+  if(!is.null(cellRangerPaths[[smp]])){
+    cellRangersObjs[[smp]] <- load_cellranger_matrix(cellRangerPaths[[smp]],genome = "mm9")
+  }
+  else{
+    cellRangersObjs[[smp]] <- NULL
+  }
+}
+
+```
+
+
+## Get the number neuronal cells in each sample
+
+```{r}
+
+nbNeuronalPerSample <- data.frame()
+
+for(smp in names(cellRangerPaths)){
+  
+  if(!is.null(cellRangersObjs[[smp]])){
+    has_snap25 <- which(exprs(cellRangersObjs[[smp]]["ENSMUSG00000027273",] )[1,] > 0)
+    tmp <- data.frame(sample=smp, nbNeuronal=length(has_snap25), percent=100 *length(has_snap25)/ncol(cellRangersObjs[[smp]]))
+    nbNeuronalPerSample <- rbind(nbNeuronalPerSample,tmp)
+  }
+}
+nbNeuronalPerSample
+```
+
+## Create Seurate objects 
+
+```{r}
+
+sobjPerSample <- list()
+
+for(smp in names(cellRangerPaths)){
+  message(smp)
+  if(!is.null(cellRangerPaths[[smp]])){
+    fname <- file.path(cellRangerPaths[[smp]],"outs/filtered_gene_bc_matrices/mm9/")
+    
+    sobj <- Read10X(fname)
+    
+    # cnames <- colnames(sobj)
+    # rnames <- rownames(sobj)
+    # sobj <- as(sobj, "dgCMatrix")
+    # colnames(sobj) <- cnames
+    # rownames(sobj) <- rnames
+    
+    
+    #sobj  <- new("seurat", raw.data = sobj)
+    
+    #setup setting do.scale and do.center to F - this means that we will NOT scale genes by default (to speed things up)
+    # sobj <- Setup(sobj,total.expr = 1e6,
+    #                   min.cells = 3,
+    #                   min.genes = 0, 
+    #                   project = smp, 
+    #                   do.scale = F, 
+    #                   do.center = F, 
+    #                   do.logNormalize = T,
+    #                   names.field = 2,
+    #                   names.delim = "\\-")
+    
+    sobj <- CreateSeuratObject(raw.data = sobj,
+                               min.cells = 3,
+                               min.genes = 0,
+                               project = smp,
+                               do.center = F,
+                               do.scale = F,
+                               scale.factor = 1e6,
+                               names.field = 2,
+                               normalization.method = "LogNormalize",
+                               names.delim = "\\-")
+    
+
+    mito.genes <- grep("^mt-", rownames(sobj@data), value = T)
+    print(paste("NbMito:",length(mito.genes)))
+
+    if(length(mito.genes) > 0){
+      percent.mito <- colSums(as.matrix(sobj@raw.data[mito.genes, colnames(sobj@data)])) / colSums(as.matrix(sobj@raw.data[, colnames(sobj@data)]))
+      sobj <- AddMetaData(sobj, percent.mito, "percent.mito")
+    }
+
+    # res <- load_cellranger_analysis_results(cellRangerPaths[[smp]])
+    # cellNames <- str_match(res$kmeans$kmeans_5_clusters$Barcode,pattern = "(\\w+)-\\d+")[,2]
+    # pos <- match(colnames(sobj@data), cellNames)
+    # 
+    # cnames <- c(colnames(sobj@data.info),'kmeans_5')
+    # sobj@data.info <- cbind(sobj@data.info, res$kmeans$kmeans_5_clusters$Cluster[pos])
+    # colnames(sobj@data.info) <- cnames
+    
+    sobjPerSample[[smp]] <- sobj
+    rm(sobj)
+  }
+}
+
+```
+
+
+## Number of neuronal cells in each sample (after filtering)
+
+```{r}
+nbNeuronalPerSample_sobj <- data.frame()
+
+for(smp in names(sobjPerSample)){
+  neural_cells <- colnames(sobjPerSample[[smp]]@data)[which( as.numeric(sobjPerSample[[smp]]@data["Snap25",]) > 0)]
+  tmp <- data.frame(sample=smp, nbNeuronal =length(neural_cells),
+                    percent=100 *length(neural_cells)/ncol(sobjPerSample[[smp]]@data))
+  nbNeuronalPerSample_sobj <- rbind(nbNeuronalPerSample_sobj,tmp)
+}
+nbNeuronalPerSample_sobj
+```
+
+
+## merge samples
+
+```{r}
+NAc_merged_sobj <- NULL
+
+
+for(i in 1:(length(names(sobjPerSample))-1)){
+  j=i+1
+  message(paste("Merging with",names(sobjPerSample)[j]))
+  if(i==1){
+    
+    NAc_merged_sobj <- MergeSeurat(object1 = sobjPerSample[[ i ]],object2 = sobjPerSample[[j ]],
+                                   scale.factor = 1e6,
+                                   do.scale = F,
+                                   do.center = F,
+                                   do.normalize = F,
+                                   names.field = 2,
+                                   names.delim = "\\_",
+                                   add.cell.id1 = names(sobjPerSample)[ i ],
+                                   add.cell.id2 = names(sobjPerSample)[ j ])
+  }else{
+    
+    normalize <- ifelse(j==length(names(sobjPerSample)),TRUE,FALSE)
+    NAc_merged_sobj <- MergeSeurat(object1 = NAc_merged_sobj,object2 = sobjPerSample[[ j ]],
+                                   scale.factor = 1e6,
+                                   do.scale = F,
+                                   do.center = F,
+                                   do.normalize = normalize,
+                                   names.field = 2,
+                                   names.delim = "\\_",
+                                   add.cell.id1 = NULL,
+                                   add.cell.id2 = names(sobjPerSample)[ j ])
+  }
+  print(table(str_match(rownames(NAc_merged_sobj@meta.data),pattern = "\\w+\\.(\\w+)\\.*")[,2]))
+}
+
+
+ident <-   str_match(rownames(NAc_merged_sobj@meta.data),pattern = ".*(NAc_Sample.+)_.+")[,2]
+
+ident <- factor(ident,levels = names(sobjPerSample))
+
+NAc_merged_sobj <- SetIdent(NAc_merged_sobj,ident.use = ident)
+
+cnames <- colnames(NAc_merged_sobj@meta.data)
+cnames <- c(cnames, "Sample")
+NAc_merged_sobj@meta.data <- cbind(NAc_merged_sobj@meta.data, ident)
+colnames(NAc_merged_sobj@meta.data) <- cnames
+
+NAc_merged_sobj
+```
+
+
+## Set the samples labels
+
+```{r}
+NAc_merged_sobj@data.info$treatment <- ""
+NAc_merged_sobj@data.info$Period <- ""
+
+pos <- which(NAc_merged_sobj@data.info$Sample %in% c("NAc_Sample1","NAc_Sample4"))
+NAc_merged_sobj@data.info$treatment[pos] <- "Cocaine"
+NAc_merged_sobj@data.info$Period[pos] <- "Maintenance"
+
+
+pos <- which(NAc_merged_sobj@data.info$Sample %in% c("NAc_Sample2","NAc_Sample3"))
+NAc_merged_sobj@data.info$treatment[pos] <- "Saline"
+NAc_merged_sobj@data.info$Period[pos] <- "Maintenance"
+
+
+pos <- which(NAc_merged_sobj@data.info$Sample %in% c("NAc_Sample5","NAc_Sample7"))
+NAc_merged_sobj@data.info$treatment[pos] <- "Saline"
+NAc_merged_sobj@data.info$Period[pos] <- "withdraw_48h"
+
+
+pos <- which(NAc_merged_sobj@data.info$Sample %in% c("NAc_Sample6","NAc_Sample8"))
+NAc_merged_sobj@data.info$treatment[pos] <- "Cocaine"
+NAc_merged_sobj@data.info$Period[pos] <- "withdraw_48h"
+
+
+pos <- which(NAc_merged_sobj@data.info$Sample %in% c("NAc_Sample9","NAc_Sample10"))
+NAc_merged_sobj@data.info$treatment[pos] <- "Cocaine"
+NAc_merged_sobj@data.info$Period[pos] <- "withdraw_15d"
+
+
+pos <- which(NAc_merged_sobj@data.info$Sample %in% c("NAc_Sample11","NAc_Sample12"))
+NAc_merged_sobj@data.info$treatment[pos] <- "Saline"
+NAc_merged_sobj@data.info$Period[pos] <- "withdraw_15d"
+
+```
+
+
+
+## Remove the UMI and mito conderial genes bias
+
+```{r}
+NAc_merged_sobj <- SubsetData(NAc_merged_sobj,subset.name = "percent.mito",accept.high = 0.1)
+NAc_merged_sobj
+```
+
+```{r}
+NAc_merged_sobj <- ScaleData(NAc_merged_sobj,vars.to.regress =  c("nUMI","percent.mito","Sample"),
+                              do.scale = F,do.center =F)
+```
+
+
+## Try the M3Drop method
+
+```{r}
+require(M3Drop)
+M3DNorm <- M3DropCleanData(as.matrix(NAc_merged_sobj@raw.data),
+                           labels = colnames(NAc_merged_sobj@raw.data),
+                           is.counts = TRUE,
+                           min_detected_genes = 1500)
+
+M3Dnorma_fits <- M3DropDropoutModels(expm1(as.matrix(NAc_merged_sobj@scale.data)))
+```
+
+
+```{r}
+
+ var_genes <- M3DropDifferentialExpression(M3DNorm$data, mt_method="fdr", mt_threshold=1e-30)
+
+NAc_merged_sobj@var.genes <- rownames(var_genes)
+```
+
+## Get variable genes 
+
+```{r}
+meanNoExp <- function(x){
+  return(log(mean(x)+1))
+}
+
+
+NAc_merged_sobj <- MeanVarPlot(NAc_merged_sobj, x.low.cutoff = 0.1, #fxn.x = meanNoExp,
+                    y.cutoff = 1, do.contour = F,do.recalc = TRUE, 
+                    cex.use=0.2, cex.text.use=0.5)
+
+```
+
+
+## Get correlation between variable genes
+
+```{r}
+var_genes_expr <- NAc_merged_sobj@data[NAc_merged_sobj@var.genes,]
+var_genes_cor <- cor(t(as.matrix(var_genes_expr)))
+```
+
+
+
+
+## Do PCA
+
+```{r, fig.height=12, fig.width=12}
+NAc_merged_sobj <- PCA(NAc_merged_sobj, pc.genes = NAc_merged_sobj@var.genes, pcs.store = 30, do.print = FALSE)
+NAc_merged_sobj <- ProjectPCA(NAc_merged_sobj)
+#NAc_sobj <- PCA(NAc_sobj, pc.genes =  NAc_sobj@var.genes, do.print = F)
+#PCElbowPlot(NAc_merged_sobj, num.pc = 30)
+#PrintPCA(NAc_merged_sobj,pcs.print = 1:11)
+PCHeatmap(NAc_merged_sobj,pc.use = 1:15,num.genes = 100,cells.use = 500,do.balanced = T) 
+#PCHeatmap(NAc_merged_sobj,pc.use = 16:30,num.genes = 100,cells.use = 200,do.balanced = T)
+#PCHeatmap(NAc_merged_sobj,pc.use = 25:36,100)
+```
+
+
+
+### PCs heatmap
+```{r}
+dir.create("results_NAc_all",showWarnings = FALSE)
+dir.create("results_NAc_all/PCs_ScaterPlots",showWarnings = FALSE)
+
+## Plot cells in PC1 and PC2 space
+for(i in seq(from=1, to=29, by=1) ){
+  print(i)
+  pdf(paste0("results_NAc_all/PCs_ScaterPlots/PCA_plot_PC_",i,".pdf"), height=5, width=5)
+  PCAPlot(NAc_merged_sobj,i,i+1, pt.size = 1)
+  dev.off()
+}
+
+
+## Plot heatmap of the top 100 genes for each PC
+
+# top <- 200
+# dir.create("results_NAc_all/PCs_heatmap",showWarnings = F)
+# for(i in 1:30 ){
+#   print(i)
+#   pdf(paste0("results_NAc_all/PCs_heatmap/PC",i,"_top_",top,"_genes.pdf"), height=10, width=15)
+#   ttl <- paste0("Top ",top," genes by PC",i," score")
+#   plotPCtopGenes(NAc_merged_sobj, ngenes=top,pc.use = i, ttl,rowName = T)
+#   dev.off()
+# }
+
+```
+
+
+## Get significant PCs
+
+## Jackstraw analysis
+
+```{r, fig.height=15, fig.width=8}
+#NAc_merged_sobj <- JackStraw(NAc_merged_sobj, num.replicate = 100, do.print = TRUE)
+#JackStrawPlot(NAc_merged_sobj, PCs = 1:30) + ggtitle("QQ-plot JackStraw PC p-value Vs uniform distribution")
+```
+
+## Run tSNE
+
+```{r}
+NAc_merged_sobj <- RunTSNE(NAc_merged_sobj, dims.use = 1:11, do.fast = T,dim_embed = 3)
+
+samplesColors <- pal_d3(palette = "category20c")(length(levels(NAc_merged_sobj@ident)))
+names(samplesColors) <- levels(NAc_merged_sobj@ident)
+
+plottSNEClustering(NAc_merged_sobj, clustersColors = samplesColors)
+```
+
+
+
+## Snap25 distribution
+
+```{r}
+FeaturePlot3D(NAc_merged_sobj,"Snap25",dolog = FALSE)
+```
+
+## Get the similarity between the clusters
+
+```{r}
+samplesPhaseColors <- rep(pal_npg()(3),each=4)
+
+plot.phylo(NAc_merged_sobj@cluster.tree[[1]], edge.width = 2, label.offset = 1,direction="downwards",tip.color =  samplesPhaseColors)
+
+```
+
+
+## Clustering
+
+For the total data set, we just use the tsne coordinates and the k-means for clustering
+
+```{r, fig.height=4, fig.width=10}
+require(mclust)
+
+#NAc_merged_nbClust <- NbClust(NAc_merged_sobj@pca.rot[,1:10],min.nc = 10,max.nc = 30,method = "kmeans",index = "silhouette")
+
+wss <- (nrow(NAc_merged_sobj@pca.rot)-1)*sum(apply(NAc_merged_sobj@pca.rot,2,var))
+for (i in 2:30) wss[i] <- sum(kmeans(NAc_merged_sobj@pca.rot,centers=i,iter.max = 100,nstart = 10)$withinss)
+
+plot(1:30, wss, type="b", xlab="Number of Clusters",
+     ylab="Within groups sum of squares",
+     main="Assessing the Optimal Number of Clusters with the Elbow Method",
+     pch=20, cex=2)
+
+#NAc_meged_sobj.BIC <- mclustBIC(NAc_merged_sobj@pca.rot[,1:12],G = 10:30,modelNames = "VVI")
+
+#NAc_meged_sobj.mclust = Mclust(NAc_merged_sobj@pca.rot[,1:10], x = NAc_meged_sobj.BIC)
+
+```
+
+
+```{r}
+NAc_merged_sobj.kclusters <- kmeans(NAc_merged_sobj@pca.rot,centers = 16,iter.max = 100,nstart = 10)
+
+```
+
+### Try the affinity propagation algorithm
+
+
+```{r}
+require(apcluster)
+
+NAc_merged_sobj.apclus <- apcluster(negDistMat(r=2),NAc_merged_sobj@tsne.rot)
+
+```
+
+
+```{r}
+NAc_merged_sobj_3D <- as.data.frame(NAc_merged_sobj@tsne.rot)
+#NAc_merged_sobj_3D$cluster <- factor(NAc_meged_sobj.mclust$classification)
+NAc_merged_sobj_3D$cluster <- factor(NAc_merged_sobj.kclusters$cluster)
+
+plot_ly(NAc_merged_sobj_3D, x= ~tSNE_1, y=~tSNE_2, z= ~tSNE_3, 
+        color = ~ cluster, 
+        colors = pal_d3(palette = "category20")(length(unique(NAc_merged_sobj.kclusters$cluster))), 
+        marker=list(size=2))
+```
+
+```{r, fig.height=8, fig.width=12}
+clusterCols <- pal_d3(palette = "category20")(length(unique(NAc_merged_sobj.kclusters$cluster)))
+names(clusterCols) <- levels(NAc_merged_sobj_3D$cluster)
+
+NAc_merged_sobj <- SetIdent(NAc_merged_sobj,ident.use = NAc_merged_sobj.kclusters$cluster)
+
+plottSNEClustering(NAc_merged_sobj,clusterCols)
+```
+
+
+
+
+
+## Clusters tree
+
+
+```{r}
+NAc_merged_sobj <- SetIdent(NAc_merged_sobj,ident.use = NAc_merged_sobj.kclusters$cluster)
+ BuildClusterTree(NAc_merged_sobj,reorder.numeric = TRUE, do.reorder = FALSE)
+```
+
+## Cluster the cells from Clusters 8 and 12 and split them
+
+
+```{r}
+
+cellsIn_8_and_12 <- colnames(NAc_merged_sobj@data)[which(NAc_merged_sobj@ident %in% c(8,12))]
+
+NAc_merged_8_12_sobj <- SubsetData(NAc_merged_sobj,cells.use = cellsIn_8_and_12)  
+
+
+NAc_merged_8_12_sobj.BIC <- mclustBIC(NAc_merged_8_12_sobj@tsne.rot,G = 1:6)
+
+NAc_merged_8_12_sobj.mclust = Mclust(NAc_merged_8_12_sobj@tsne.rot, x = NAc_merged_8_12_sobj.BIC)
+
+
+NAc_merged_8_12_sobj <- SetIdent(NAc_merged_8_12_sobj,ident.use = NAc_merged_8_12_sobj.mclust$classification)
+
+pos <- match(colnames(NAc_merged_8_12_sobj@data), colnames(NAc_merged_sobj@data))
+
+clustIdent <- as.numeric(as.character(NAc_merged_sobj@ident))
+
+clustIdent[pos]  <- 16 + NAc_merged_8_12_sobj.mclust$classification
+```
+
+```{r, fig.height=6, fig.width=11}
+NAc_merged_sobj <- SetIdent(NAc_merged_sobj,ident.use = clustIdent)
+
+
+NAc_merged_sobj_3D <- as.data.frame(NAc_merged_sobj@tsne.rot)
+#NAc_merged_sobj_3D$cluster <- factor(NAc_meged_sobj.mclust$classification)
+NAc_merged_sobj_3D$cluster <- NAc_merged_sobj@ident
+
+plot_ly(NAc_merged_sobj_3D, x= ~tSNE_1, y=~tSNE_2, z= ~tSNE_3, 
+        color = ~ cluster, 
+        colors = pal_d3(palette = "category20")(length(levels(NAc_merged_sobj@ident))), 
+        marker=list(size=2))
+
+
+
+BuildClusterTree(NAc_merged_sobj,reorder.numeric = TRUE, do.reorder = FALSE)
+
+```
+
+
+
+```{r findClusterMarkers}
+#save.image()
+
+clustIdent[clustIdent %in% c(4,21)]=1
+clustIdent[clustIdent %in% c(5,20,22)]=2
+clustIdent[clustIdent %in% c(17,18,19)]=17
+NAc_merged_sobj <- SetIdent(NAc_merged_sobj,ident.use = clustIdent)
+NAc_merged_sobj <- BuildClusterTree(NAc_merged_sobj,reorder.numeric = TRUE, do.reorder = TRUE)
+```
+
+
+```{r, fig.height=8, fig.width=12}
+clusterCols <- pal_d3(palette = "category20")(length(levels(NAc_merged_sobj@ident)))
+names(clusterCols) <- levels(NAc_merged_sobj@ident)
+
+plottSNEClustering(NAc_merged_sobj,clusterCols)
+```
+
+```{r}
+plottSNEClustering3D(NAc_merged_sobj,clusterCols)
+
+```
+
+
+### Find markers
+
+```{r}
+
+NAc_merged_ClustersMarkers <- list()
+for(clus in  levels(NAc_merged_sobj@ident)){
+  message(paste("Processing cluster",clus))
+  NAc_merged_ClustersMarkers[[clus]] <- FindMarkers(NAc_merged_sobj,ident.1=clus,thresh.use = 2,test.use="roc")
+  #NAc_merged_ClustersMarkers[[clus]]$pvalue <- as.numeric(as.character(NAc_merged_ClustersMarkers[[clus]]$pvalue))
+  #NAc_merged_ClustersMarkers[[clus]]$log2FC <- as.numeric(as.character(NAc_merged_ClustersMarkers[[clus]]$log2FC))
+}
+```
+
+
+## Save Markers results
+
+```{r}
+top <- 15
+pvalCut <- 1e-10
+log2fcThr <- log2(4)
+
+NAc_merged_makersName <- c()
+NAc_merge_markersClus <- c()
+
+
+dir.create("results_NAc_all/",showWarnings = F)
+dir.create("results_NAc_all/Markers_NAc_allCells",showWarnings = F)
+dir.create("results_NAc_all/Markers_NAc_allCells/tSNE",showWarnings = F)
+dir.create("results_NAc_all/Markers_NAc_allCells/BoxPlot",showWarnings = F)
+dir.create("results_NAc_all/Markers_NAc_allCells/ViolinPlot",showWarnings = F)
+dir.create("results_NAc_all/Markers_NAc_allCells/CSV",showWarnings = F)
+
+for(i in levels(NAc_merged_sobj@ident)){
+  print(paste("Processing cluster",i))
+  
+  sig <- subset(NAc_merged_ClustersMarkers[[i]],  avg_diff > 2)
+  
+  # 
+  # if(nrow(sig)>20){
+  #    aucThr <- quantile(na.omit(sig$myAUC), 0.9)
+  #    sig <- subset(sig, myAUC >= aucThr)
+  # }
+  # sig <- sig[order(sig$myAUC,decreasing = T),]
+  # 
+  # message("Boxplots")
+  # mrks <- head(rownames(NAc_merged_ClustersMarkers[[i]]), top)
+  # mrks <- mrks[!is.na(mrks)]
+  # 
+  # NAc_merged_makersName <- c(NAc_merged_makersName, mrks) 
+  # NAc_merge_markersClus <- c(NAc_merge_markersClus, rep(i, length(mrks)))
+  # 
+  # title <- paste("Top",top,"markers for cluster",i)
+  # p <- plotViolinPerGene(mrks, NAc_merged_sobj@ident, NAc_merged_sobj@data, clusterCols, title)
+  # p + theme(strip.background = element_blank(), legend.position="none", axis.text.y = element_text(size=9) )
+  # fname <- paste0("results_NAc_all/Markers_NAc_allCells/BoxPlot/Cluster_",i,"_top_",top,"_markers.pdf")
+  # ggsave(fname, height=30, width = 7)
+  # 
+  # message("Violinplots")
+  # p <- plotViolinPerGene(mrks, NAc_merged_sobj@ident, 
+  #                        NAc_merged_sobj@data, 
+  #                        clusterCols, title,
+  #                        plotType = "violin")
+  # p + theme(strip.background = element_blank(), legend.position="none", axis.text.y = element_text(size=9) )
+  # fname <- paste0("results_NAc_all/Markers_NAc_allCells/ViolinPlot/Cluster_",i,"_top_",top,"_markers.pdf")
+  # ggsave(fname, height=30, width = 7)
+  # 
+  # 
+  # message("Feature_plots")
+  # fname <- paste0("results_NAc_all/Markers_NAc_allCells/tSNE/tSNE_Cluster_",i,"_top_",top,"_markers.pdf")
+  # pdf(fname,width = 7,height = 7)
+  # FeaturePlot(NAc_merged_sobj, mrks,pt.size = 0.6,dim.1 = 1, dim.2 = 3) # , cols.use = brewer.pal(9, "YlOrRd")[-1])
+  # dev.off()
+  # 
+  # fname <- paste0("results_NAc_all/Markers_NAc_allCells/CSV/Cluster_",i,"_markers_pvals.csv")
+  # write.csv(NAc_merged_ClustersMarkers[[i]], fname, row.names = TRUE)
+}
+
+
+names(clusterCols) <- levels(NAc_merged_sobj@ident)
+
+
+
+png("results_NAc_all/NAc_clust_markers.png",width = 2048,height =4096 )
+plotMarkersHeatmap(NAc_merged_sobj,
+                   markers = NAc_merged_makersName, 
+                   clustersColors = clusterCols,
+                   markerClusters = as.numeric(NAc_merge_markersClus), 
+                   clusterCols = FALSE)
+dev.off()
+
+
+
+png("results_NAc_all/NAc_clust_markers_all.png",width = 2048,height =4096 )
+plotMarkers.pheatmap(NAc_merged_sobj,
+                   markers = unique(NAc_merged_makersName), 
+                   clustersColors =clusterCols,
+                   markerClusters = NULL,
+                   clusterCols = FALSE)
+dev.off()
+
+
+```
+
+
+
+## Calculate the number of neuronal cells in each cluster
+
+```{r}
+clust <- levels(NAc_merged_sobj@ident)
+
+nbNeuro_inClusters <- data.frame()
+
+for(i in clust){
+  message(paste("Cluster",i))
+  inClust <- which(NAc_merged_sobj@ident == i)
+  nbNeuronal <- which( as.numeric(NAc_merged_sobj@data["Snap25",inClust]) > 0)
+  df <- data.frame(cluster=i,
+                   nbCells = length(inClust),
+                   nbNeuronal = length(nbNeuronal),
+                   percentage = length(nbNeuronal)/length(inClust))
+  nbNeuro_inClusters <- rbind(nbNeuro_inClusters,df)
+}
+nbNeuro_inClusters
+```
+
+
+## Plot the proportion of neuronal cells 
+
+
+```{r, fig.height=3, fig.width=8}
+
+ggplot(nbNeuro_inClusters, aes(x=cluster, y=percentage)) + 
+  geom_bar(stat = "identity",position = position_dodge(),fill="royalblue2") + theme_bw() + 
+  ggtitle("Percentage of Snap25+ cells in each cluster") + 
+  theme(plot.title = element_text(face="bold",color="black",hjust = 0.5),
+        title = element_text(face="bold",color="black"),
+        axis.text = element_text(face="bold",color="black"))
+
+```
+
+
+## Calculate the expected distribution
+
+```{r}
+sampleNames <-  levels(NAc_merged_sobj@data.info$Sample)
+
+
+PropInCells <- data.frame()
+
+rndSamples <- c()
+for(smp in sampleNames){
+  message(paste("Processing",smp))
+  
+  nbCellsInSample <- nrow(subset(NAc_merged_sobj@data.info, Sample == smp))
+  
+  ## randomly sample the same number of cells
+  
+  for(i in 1:10){
+    toUse <- sample(x = 1:nrow(NAc_merged_sobj@data.info),nbCellsInSample)
+    rndSamples <- c(rndSamples,NAc_merged_sobj@ident[toUse])
+    nbInClus <- table(NAc_merged_sobj@ident[toUse])
+    nbInClus <- nbInClus/nbCellsInSample
+    PropInCells <- rbind(PropInCells,nbInClus)
+  }
+}
+colnames(PropInCells) <- levels(NAc_merged_sobj@ident)
+```
+
+
+## Get the proportion of each sample in each cluster
+
+```{r, fig.height=18, fig.width=10}
+
+samplesPerCluster <- data.frame(sample=NAc_merged_sobj@data.info$Sample,
+                                cluster=NAc_merged_sobj@ident)
+
+nbCellPerCluster <-  ddply(samplesPerCluster,.(sample,cluster),summarise,nbCells=length(sample))
+
+for(smp in sampleNames){
+  pos <- which(nbCellPerCluster$sample == smp)
+  nbCellPerCluster$nbCells[pos] <- nbCellPerCluster$nbCells[pos]/sum(nbCellPerCluster$nbCells[pos])
+}
+
+
+df <- data.frame(sample="random",cluster=unique(nbCellPerCluster$cluster),nbCells = colMeans(PropInCells))
+
+nbCellPerCluster <- rbind(nbCellPerCluster,df)
+
+nbCellPerCluster$cluster <- factor(nbCellPerCluster$cluster, levels= unique(nbCellPerCluster$cluster))
+
+ggplot(nbCellPerCluster,aes(x=cluster,y= nbCells, fill=sample)) + geom_bar(stat = "identity") + theme_bw() + 
+  scale_fill_d3(palette = "category20c") + facet_grid(sample~.,scales = "free_y") +
+  theme(plot.title = element_text(face="bold",color="black",hjust = 0.5),
+        title = element_text(face="bold",color="black"),
+        axis.text = element_text(face="bold",color="black"))
+
+```
+
+
+## Get the similarity to the random distribution
+
+```{r}
+
+for(smp in sampleNames){
+  tmp <- subset(samplesPerCluster, sample == smp)
+  tmp$cluster <- as.numeric(as.character(tmp$cluster))
+  
+  ks.test(tmp$cluster,rndSamples)
+  
+}
+
+```
+
+
+## Plot correlation with the random distribution
+
+
+```{r, fig.height=4, fig.width=12}
+corWithExpected <- matrix(0, nrow=12,ncol=1)
+rownames(corWithExpected) <- sampleNames
+colnames(corWithExpected) <- "correlation"
+
+for(smp in sampleNames){
+  tmp <- subset(nbCellPerCluster,sample == smp)
+  nbCells <- rep(0,nbClust)
+  nbCells[tmp$cluster] <- tmp$nbCells
+  
+  corWithExpected[smp,1] <- cor(nbCells,df$nbCells,method = "kendall")
+}
+
+corWithExpected <- as.data.frame(corWithExpected)
+corWithExpected$sample <- sampleNames
+
+corWithExpected$sample <- factor(corWithExpected$sample, sampleNames)
+
+ggplot(corWithExpected, aes(x=sample,y=correlation)) + geom_point(size=2) +
+  scale_fill_d3(palette = "category20c") + ylab("correlation with expected distribution")  + xlab("Sample") +
+  ggtitle("Correlation of the difference samples with expected distribution") + theme_bw() + 
+  theme(axis.text = element_text(face = "bold",color="black"),
+        axis.text.x = element_text(angle = 45,vjust = 0.5), 
+        axis.title = element_text(face = "bold",color="black"),
+        plot.title =element_text(hjust = 0.5))
+
+```
+
+
+## Get statistics about the number of expressed genes and UMI in each cluster per-sample
+
+
+```{r}
+NAc_merged_sobj@data.info$L1_cluster <- NAc_merged_sobj@ident
+
+
+
+ggplot(NAc_merged_sobj@data.info, aes(x=L1_cluster,y=nGene, fill=L1_cluster)) + geom_violin() +
+  scale_fill_d3(palette = "category20") + theme_bw() + facet_grid(Sample~.) + 
+  guides(fill=guide_legend(title="Cluster")) + xlab("Cluster") + ylab("Number of expressed genes") +
+  ggtitle("Number of expressed genes per-cluster in each sample") +
+  theme(text = element_text(face = "bold",color = "black"),
+        axis.text = element_text(face = "bold",color = "black"))
+
+
+
+ggplot(NAc_merged_sobj@data.info, aes(x=L1_cluster,y=nUMI, fill=L1_cluster)) + geom_violin() +
+  scale_fill_d3(palette = "category20") + theme_bw() + facet_grid(Sample~.) + 
+  guides(fill=guide_legend(title="Cluster")) + xlab("Cluster") + ylab("Number of UMI") +
+  ggtitle("Number of UMI per-cluster in each sample") +
+  theme(text = element_text(face = "bold",color = "black"),
+        axis.text = element_text(face = "bold",color = "black"))
+
+
+ggplot(NAc_merged_sobj@data.info, aes(x=L1_cluster,y=nUMI, fill=L1_cluster)) + geom_violin() +
+  scale_fill_d3(palette = "category20") + theme_bw() + facet_grid(Sample~.) + 
+  guides(fill=guide_legend(title="Cluster")) + xlab("Cluster") + ylab("Number of UMI (log10)") +
+  ggtitle("Number of UMI per-cluster in each sample") +
+  theme(text = element_text(face = "bold",color = "black"),
+        axis.text = element_text(face = "bold",color = "black")) +
+  scale_y_log10()
+
+
+```
+
+
+## Remove the cells of NAc_sample5
+
+```{r}
+reliableSamples <- rownames(subset( NAc_merged_sobj@data.info, Sample != "NAc_Sample5") )
+
+NAc_merged_noSample5_sobj <- SubsetData(NAc_merged_sobj,cells.use = reliableSamples)
+
+NAc_merged_noSample5_sobj <- MeanVarPlot(NAc_merged_noSample5_sobj, x.low.cutoff = 0.5, #fxn.x = meanNoExp,
+y.cutoff = 2, do.contour = F,do.recalc = TRUE,
+cex.use=0.2, cex.text.use=0.5)
+
+
+NAc_merged_noSample5_sobj <- PCA(NAc_merged_noSample5_sobj, pc.genes = NAc_merged_noSample5_sobj@var.genes, pcs.store = 30, do.print = FALSE)
+
+NAc_merged_noSample5_sobj <- JackStrawMC(NAc_merged_noSample5_sobj,num.pc =30,num.replicate = 50,do.print = F,num.cores = 10)
+
+NAc_merged_noSample5_sobj <- ProjectPCA(NAc_merged_noSample5_sobj)
+
+sig.genes.pca <- PCASigGenes(NAc_merged_noSample5_sobj,1:10, pval.cut = 1e-5,max.per.pc = 100,use.full = T)
+
+NAc_merged_noSample5_sobj@var.genes <- intersect(sig.genes.pca, NAc_merged_noSample5_sobj@var.genes) 
+
+
+NAc_merged_noSample5_sobj <- RunTSNE(NAc_merged_noSample5_sobj, dims.use = 1:10, do.fast = F,dim_embed = 3)
+
+```
+
+
+## Find markers
+
+```{r}
+source("IterativeClustering.R")
+
+levl1 <- splitClusters(NAc_merged_noSample5_sobj)
+
+NAc_merged_ClustersMarkers <- list()
+for(clus in  levels(NAc_merged_noSample5_sobj@ident)){
+  message(paste("Processing cluster",clus))
+  NAc_merged_ClustersMarkers[[clus]] <- FindMarkers(NAc_merged_noSample5_sobj,ident.1=clus,thresh.use = 2,test.use="roc")
+  #NAc_merged_ClustersMarkers[[clus]]$pvalue <- as.numeric(as.character(NAc_merged_ClustersMarkers[[clus]]$pvalue))
+  #NAc_merged_ClustersMarkers[[clus]]$log2FC <- as.numeric(as.character(NAc_merged_ClustersMarkers[[clus]]$log2FC))
+}
+
+BestMarkers <- data.frame()
+
+
+for(i in levels(NAc_merged_noSample5_sobj@ident)){
+  print(paste("Processing cluster",i))
+  
+  sig <- subset(NAc_merged_ClustersMarkers[[i]],  power > 0.8 & pct.1 > 0.8 & pct.2 < 0.2)
+  
+  if(nrow(sig)> 0){
+    sig$cluster <- i
+    o <- order(abs(log2(sig$pct.1/sig$pct.2)),decreasing = T)
+    BestMarkers <- rbind(BestMarkers,head(sig[o,]))
+  }
+}
+
+
+
+for(i in levels(NAc_merged_noSample5_sobj@ident)){
+  print(paste("Processing cluster",i))
+  
+  sig <- subset(NAc_merged_ClustersMarkers[[i]],  power > 0.8 & pct.1 > 0.8 & pct.2 < 0.2)
+  
+  # 
+  # if(nrow(sig)>20){
+  #    aucThr <- quantile(na.omit(sig$myAUC), 0.9)
+  #    sig <- subset(sig, myAUC >= aucThr)
+  # }
+  # sig <- sig[order(sig$myAUC,decreasing = T),]
+  # 
+  # message("Boxplots")
+   mrks <- head(rownames(NAc_merged_ClustersMarkers[[i]]), top)
+   mrks <- mrks[!is.na(mrks)]
+  
+   # 
+  # NAc_merged_makersName <- c(NAc_merged_makersName, mrks) 
+  # NAc_merge_markersClus <- c(NAc_merge_markersClus, rep(i, length(mrks)))
+  # 
+   title <- paste("Top",top,"markers for cluster",i)
+   #p <- plotViolinPerGene(mrks, NAc_merged_noSample5_sobj@ident, NAc_merged_noSample5_sobj@data, clusterCols, title)
+   #p + theme(strip.background = element_blank(), legend.position="none", axis.text.y = element_text(size=9) )
+   #fname <- paste0("results_NAc_all/Markers_NAc_allCells/BoxPlot/Cluster_",i,"_top_",top,"_markers.pdf")
+   #ggsave(fname, height=30, width = 7)
+  # 
+   message("Violinplots")
+  p <- plotViolinPerGene(mrks, NAc_merged_noSample5_sobj@ident, 
+                          NAc_merged_noSample5_sobj@data, 
+                          clusterCols, title,
+                          plotType = "violin")
+   p + theme(strip.background = element_blank(), legend.position="none", axis.text.y = element_text(size=9) )
+  # fname <- paste0("results_NAc_all/Markers_NAc_allCells/ViolinPlot/Cluster_",i,"_top_",top,"_markers.pdf")
+  # ggsave(fname, height=30, width = 7)
+  # 
+  # 
+  # message("Feature_plots")
+  # fname <- paste0("results_NAc_all/Markers_NAc_allCells/tSNE/tSNE_Cluster_",i,"_top_",top,"_markers.pdf")
+  # pdf(fname,width = 7,height = 7)
+  # FeaturePlot(NAc_merged_sobj, mrks,pt.size = 0.6,dim.1 = 1, dim.2 = 3) # , cols.use = brewer.pal(9, "YlOrRd")[-1])
+  # dev.off()
+  # 
+  # fname <- paste0("results_NAc_all/Markers_NAc_allCells/CSV/Cluster_",i,"_markers_pvals.csv")
+  # write.csv(NAc_merged_ClustersMarkers[[i]], fname, row.names = TRUE)
+}
+
+
+
+
+```
+
+
+
+## Take neuronal clusters 
+
+
+```{r}
+
+neuronalClusters <- subset(nbNeuro_inClusters, percentage > 0.5)
+
+inNeuronalClusters <- which(NAc_merged_sobj.kclusters$cluster %in% neuronalClusters$cluster)
+
+neural_cells <- colnames(NAc_merged_sobj@data[,inNeuronalClusters])
+
+NAc_neuro_saline_sobj <- SubsetData(NAc_merged_sobj,cells.use = neural_cells)
+
+```
+
+
+## Get variable genes 
+
+
+```{r}
+neuro_var_genes <- getVariableGenesM3Drop(NAc_neuro_saline_sobj)
+NAc_neuro_saline_sobj@var.genes <- rownames(neuro_var_genes)
+```
+
+
+
+## Calculate PCA
+
+```{r, fig.height=10, fig.width=10}
+#NAc_neuro_sobj2@var.genes <- var_genes
+NAc_neuro_saline_sobj=PCA(NAc_neuro_saline_sobj,pc.genes= NAc_neuro_saline_sobj@var.genes, do.print=FALSE)
+NAc_neuro_saline_sobj <- ProjectPCA(NAc_neuro_saline_sobj)
+
+PCHeatmap(NAc_neuro_saline_sobj,pc.use = 1:15,num.genes = 100,cells.use = 500,do.balanced = T)
+```
+
+
+### PCs heatmap
+```{r}
+#NAc_neuro_saline_sobj <- SetIdent(NAc_neuro_saline_sobj, ident.use = NAc_neuro_saline_sobj@ident)
+dir.create("results_NAc_neural_saline",showWarnings = FALSE)
+dir.create("results_NAc_neural_saline/PCs_ScaterPlots",showWarnings = FALSE)
+
+## Plot cells in PC1 and PC2 space
+for(i in seq(from=1, to=39, by=1) ){
+  print(i)
+  pdf(paste0("results_NAc_neural_saline/PCs_ScaterPlots/PCA_plot_PC_",i,".pdf"), height=5, width=5)
+  PCAPlot(NAc_neuro_saline_sobj,i,i+1, pt.size = 1)
+  dev.off()
+}
+
+## Plot heatmap of the top 100 genes for each PC
+
+top <- 100
+dir.create("results_NAc_neural_saline/PCs_heatmap",showWarnings = F)
+for(i in 1:4 ){
+  print(i)
+  pdf(paste0("results_NAc_neural_saline/PCs_heatmap/PC",i,"_top_",top,"_genes.pdf"), height=10, width=15)
+  ttl <- paste0("Top ",top," genes by PC",i," score")
+  plotPCtopGenes(NAc_neuro_saline_sobj, ngenes=top,pc.use = i, ttl,rowName = T)
+  dev.off()
+}
+```
+
+
+## Get significant PCs
+
+## Jackstraw analysis
+
+```{r, fig.height=15, fig.width=8}
+NAc_neuro_saline_sobj <- JackStraw(NAc_neuro_saline_sobj, num.replicate = 50, do.print = TRUE)
+JackStrawPlot(NAc_neuro_saline_sobj, PCs = 1:30) + ggtitle("QQ-plot JackStraw PC p-value Vs uniform distribution")
+```
+
+
+## Plot significant genes for each PC
+
+```{r}
+top <- 100
+dir.create("results_NAc_neural_saline/PCs_heatmap_sig",showWarnings = F)
+for(i in 1:5 ){
+  print(i)
+  pdf(paste0("results_NAc_neural_saline/PCs_heatmap_sig/PC",i,"_top_",top,"_genes.pdf"), height=10, width=15)
+  ttl <- paste0("Top ",top," genes by PC",i," score")
+  plotPCSigGenes(NAc_neuro_saline_sobj, ngenes=top,pc.use = i, ttl,rowName = T)
+  dev.off()
+}
+```
+
+
+## calculate tSNE
+
+```{r}
+NAc_neuro_saline_sobj <- RunTSNE(NAc_neuro_saline_sobj, dims.use = 1:10, 
+                                 do.fast = F,dim_embed = 3)
+```
+
+## TSNE plot
+
+```{r NAc_tSNE, fig.height=6, fig.width=8}
+NAc_neuro_TypesCols <- ggsci::pal_d3(palette = "category20c")(length(levels(NAc_neuro_saline_sobj@ident)))
+plt_NAc_neuro_saline_original <- TSNEPlot(NAc_neuro_saline_sobj, 
+                                   colors.use = NAc_neuro_TypesCols,
+                                   do.return=T, dim.1 =2 , dim.2=3)
+plt_NAc_neuro_saline_original
+```
+
+
+
+## 3D tSNE plot
+
+```{r}
+NAc_neuro_saline_sobj_3D <- as.data.frame(NAc_neuro_saline_sobj@tsne.rot)
+NAc_neuro_saline_sobj_3D$cluster <- factor(NAc_neuro_saline_sobj@ident)
+
+plot_ly(NAc_neuro_saline_sobj_3D, x= ~tSNE_1, y=~tSNE_2, z= ~tSNE_3, 
+        color = ~ cluster, 
+        colors = NAc_neuro_TypesCols, 
+        marker=list(size=2))
+```
+
+
+
+## Do clustering
+
+```{r, fig.height=6, fig.width=12}
+coclust <- doConcensusClustering(NAc_neuro_saline_sobj)
+
+require(apcluster)
+#coclust_apclus <- apcluster(coclust)
+#coclus_agg <- aggExCluster(coclust,x = coclust_apclus)
+
+
+coclust2 <- coclust
+coclust2[coclust2 <= 0.5] <- 0
+coclust_graph_trimed <- graph_from_adjacency_matrix(coclust^4,mode = "undirected", weighted = TRUE)
+wc2 <- cluster_infomap(coclust_graph_trimed)
+members2 <- membership(wc2)
+
+
+NAc_neuro_saline_sobj <- SetIdent(NAc_neuro_saline_sobj, ident.use = members2)
+NAc_neuro_saline_sobj=BuildClusterTree(NAc_neuro_saline_sobj,do.plot=TRUE,do.reorder=TRUE, reorder.numeric = F)
+
+
+```
+
+
+```{r, }
+members2[members2 %in% c(29)] <- 21
+members2[members2 %in% c(30)] <- 10
+
+NAc_neuro_saline_sobj <- SetIdent(NAc_neuro_saline_sobj, ident.use = members2)
+NAc_neuro_saline_sobj=BuildClusterTree(NAc_neuro_saline_sobj,do.plot=TRUE,do.reorder=TRUE, reorder.numeric = T)
+
+
+if(length(levels(NAc_neuro_saline_sobj@ident)) >20){
+  NAc_neuro_saline_clustersColors = ggsci::pal_d3(palette = "category20c")(20)
+  
+  n <- length(levels(NAc_neuro_saline_sobj@ident)) - 20
+  NAc_neuro_saline_clustersColors <- c(NAc_neuro_saline_clustersColors, ggsci::pal_rickandmorty()(n))
+}else{
+  NAc_neuro_saline_clustersColors = ggsci::pal_d3(palette = "category20c")(length(levels(NAc_neuro_saline_sobj@ident)))
+}
+
+#NAc_non_neuro_clustersColors = ggsci::pal_d3(palette = "category20")(length(levels(NAc_non_neuro_clustBased_sobj@ident)))
+```
+
+
+## Check the tSNE-plot of the new clusters
+
+```{r, fig.height=8, fig.width=10}
+plottSNEClustering(NAc_neuro_saline_sobj, clustersColors = NAc_neuro_saline_clustersColors)
+```
+
+```{r}
+plottSNEClustering3D(sobj = NAc_neuro_saline_sobj, cluster_colors =  NAc_neuro_saline_clustersColors)
+
+```
+
+
+
+### Find markers
+```{r findClusterMarkers}
+#save.image()
+NAc_neuro_saline_ClustersMarkers <- list()
+for(clus in levels(NAc_neuro_saline_sobj@ident)){
+  message(paste("Processing cluster",clus))
+  NAc_neuro_saline_ClustersMarkers[[clus]] <- getMASTmarkers(NAc_neuro_saline_sobj,clus)
+  NAc_neuro_saline_ClustersMarkers[[clus]]$pvalue <- as.numeric(as.character(NAc_neuro_saline_ClustersMarkers[[clus]]$pvalue))
+  NAc_neuro_saline_ClustersMarkers[[clus]]$log2FC <- as.numeric(as.character(NAc_neuro_saline_ClustersMarkers[[clus]]$log2FC))
+}
+```
+
+
+
+## Save Markers results
+
+```{r}
+top <- 15
+pvalCut <- 1e-10
+log2fcThr <- log2(4)
+
+NAc_neuro_saline_makersName <- c()
+NAc_neuro_saline_markersClus <- c()
+
+
+dir.create("results_NAc_neural_saline/",showWarnings = F)
+dir.create("results_NAc_neural_saline/Markers_NAc_neurons",showWarnings = F)
+dir.create("results_NAc_neural_saline/Markers_NAc_neurons/tSNE",showWarnings = F)
+dir.create("results_NAc_neural_saline/Markers_NAc_neurons/BoxPlot",showWarnings = F)
+dir.create("results_NAc_neural_saline/Markers_NAc_neurons/ViolinPlot",showWarnings = F)
+dir.create("results_NAc_neural_saline/Markers_NAc_neurons/CSV",showWarnings = F)
+
+for(i in levels(NAc_neuro_saline_sobj@ident)){
+  print(paste("Processing cluster",i))
+  
+  sig <- subset(NAc_neuro_saline_ClustersMarkers[[i]], pvalue < pvalCut & log2FC > 0)
+  
+  if(nrow(sig)>20){
+     log2fcThr <- quantile(na.omit(sig$log2FC), 0.8)
+     sig <- subset(sig, log2FC >= log2fcThr)
+     sig <- sig[order(sig$log2FC,decreasing = T),]
+  }
+  message("Boxplots")
+  mrks <- head(as.character(sig$Gene), top)
+  mrks <- mrks[!is.na(mrks)]
+  
+  NAc_neuro_saline_makersName <- c(NAc_neuro_saline_makersName, mrks) 
+  NAc_neuro_saline_markersClus <- c(NAc_neuro_saline_markersClus, rep(i, length(mrks)))
+  
+  title <- paste("Top",top,"markers for cluster",i)
+  p <- plotViolinPerGene(mrks, NAc_neuro_saline_sobj@ident, NAc_neuro_saline_sobj@data, NAc_neuro_saline_clustersColors, title)
+  p + theme(strip.background = element_blank(), legend.position="none", axis.text.y = element_text(size=9) )
+  fname <- paste0("results_NAc_neural_saline/Markers_NAc_neurons/BoxPlot/Cluster_",i,"_top_",top,"_markers.pdf")
+  ggsave(fname, height=30, width = 7)
+  
+  message("Violinplots")
+  p <- plotViolinPerGene(mrks, NAc_neuro_saline_sobj@ident, 
+                         NAc_neuro_saline_sobj@data, 
+                         NAc_neuro_saline_clustersColors, title,
+                         plotType = "violin")
+  p + theme(strip.background = element_blank(), legend.position="none", axis.text.y = element_text(size=9) )
+  fname <- paste0("results_NAc_neural_saline/Markers_NAc_neurons/ViolinPlot/Cluster_",i,"_top_",top,"_markers.pdf")
+  ggsave(fname, height=30, width = 7)
+  
+  
+  message("Feature_plots")
+  fname <- paste0("results_NAc_neural_saline/Markers_NAc_neurons/tSNE/tSNE_Cluster_",i,"_top_",top,"_markers.pdf")
+  pdf(fname,width = 7,height = 7)
+  FeaturePlot(NAc_neuro_saline_sobj, mrks,pt.size = 0.6,dim.1 = 1, dim.2 = 3) # , cols.use = brewer.pal(9, "YlOrRd")[-1])
+  dev.off()
+  
+  fname <- paste0("results_NAc_neural_saline/Markers_NAc_neurons/CSV/Cluster_",i,"_markers_pvals.csv")
+  write.csv(NAc_neuro_saline_ClustersMarkers[[i]], fname, row.names = FALSE)
+}
+
+
+names(NAc_neuro_saline_clustersColors) <- levels(NAc_neuro_saline_sobj@ident)
+
+
+
+pdf("results_NAc_neural_saline/Neuronal_clust_saline_markers.pdf",width = 20,height = 60)
+plotMarkersHeatmap(NAc_neuro_saline_sobj,
+                   markers = NAc_neuro_saline_makersName, 
+                   NAc_neuro_saline_clustersColors,
+                   markerClusters = as.numeric(NAc_neuro_saline_markersClus))
+dev.off()
+
+
+
+```
+
+
+
+## Split into D1 and D2 samples
+
+
+### Plot D1 and D2 markers 
+
+```{r}
+D1_markers <- c("Tac1","Drd1a", "Isl1","Pdyn","Slc35d3", "Accn4")
+D2_markers <- c("Drd2", "Adora2a", "Penk", "Gpr6", "Sp9","Grik3")
+
+pdf("results_NAc_neural_saline/D1_D2_markers.pdf",width = 15,height = 5)
+plotMarkersHeatmap(NAc_neuro_saline_sobj,
+                   markers = c(D1_markers,D2_markers), 
+                   NAc_neuro_saline_clustersColors,
+                   markerClusters = NULL)
+dev.off()
+
+
+```
+
+## Select D1 and D2 clusters
+
+```{r}
+
+D1_cells_clus <- colnames(NAc_neuro_saline_sobj@data)[which( NAc_neuro_saline_sobj@ident %in%  c(5:7,14:23))]
+length(D1_cells_clus)
+```
+
+```{r}
+D2_cells_clus <- colnames(NAc_neuro_saline_sobj@data)[which( NAc_neuro_saline_sobj@ident %in%  c(8:13))]
+length(D2_cells_clus)
+```
+
+```{r}
+
+NAc_D1_clustBased_sobj <- SubsetData(NAc_neuro_saline_sobj,cells.use = D1_cells_clus)
+NAc_D1_clustBased_sobj
+```
+
+
+## Cluster them again
+
+```{r}
+neuro_D1_var_genes <- getVariableGenesM3Drop(NAc_D1_clustBased_sobj)
+NAc_D1_clustBased_sobj@var.genes <- rownames(neuro_D1_var_genes)
+```
+
+
+## Calculate PCA
+
+```{r, fig.height=10, fig.width=10}
+#NAc_neuro_sobj2@var.genes <- var_genes
+NAc_D1_clustBased_sobj=PCA(NAc_D1_clustBased_sobj,pc.genes= NAc_D1_clustBased_sobj@var.genes, do.print=FALSE)
+NAc_D1_clustBased_sobj <- ProjectPCA(NAc_D1_clustBased_sobj)
+
+PCHeatmap(NAc_D1_clustBased_sobj,pc.use = 1:15,num.genes = 100,cells.use = 500,do.balanced = T)
+```
+
+
+### PCs heatmap
+```{r}
+#NAc_D1_clustBased_sobj <- SetIdent(NAc_D1_clustBased_sobj, ident.use = NAc_D1_clustBased_sobj@ident)
+dir.create("results_NAc_D1_saline",showWarnings = FALSE)
+dir.create("results_NAc_D1_saline/PCs_ScaterPlots",showWarnings = FALSE)
+
+## Plot cells in PC1 and PC2 space
+for(i in seq(from=1, to=39, by=1) ){
+  print(i)
+  pdf(paste0("results_NAc_D1_saline/PCs_ScaterPlots/PCA_plot_PC_",i,".pdf"), height=5, width=5)
+  PCAPlot(NAc_D1_clustBased_sobj,i,i+1, pt.size = 1)
+  dev.off()
+}
+
+## Plot heatmap of the top 100 genes for each PC
+
+top <- 100
+dir.create("results_NAc_D1_saline/PCs_heatmap",showWarnings = F)
+for(i in 1:4 ){
+  print(i)
+  pdf(paste0("results_NAc_D1_saline/PCs_heatmap/PC",i,"_top_",top,"_genes.pdf"), height=10, width=15)
+  ttl <- paste0("Top ",top," genes by PC",i," score")
+  plotPCtopGenes(NAc_D1_clustBased_sobj, ngenes=top,pc.use = i, ttl,rowName = T)
+  dev.off()
+}
+```
+
+
+
+## Get significant PCs
+
+## Jackstraw analysis
+
+```{r, fig.height=15, fig.width=8}
+NAc_D1_clustBased_sobj <- JackStraw(NAc_D1_clustBased_sobj, num.replicate = 50, do.print = TRUE)
+JackStrawPlot(NAc_D1_clustBased_sobj, PCs = 1:30) + ggtitle("QQ-plot JackStraw PC p-value Vs uniform distribution")
+```
+
+
+## Try the CIDR technique 
+
+```{r}
+require(CIDR)
+
+```
+
+
+```{r, fig.height=5, fig.width=8}
+sData_D1_saline <- scDataConstructor(as.matrix(NAc_D1_clustBased_sobj@raw.data))
+#sData_D1_saline@nData <- sData_D1_saline@tags
+
+sData_D1_saline <- determineDropoutCandidates(sData_D1_saline)#,alpha = 0.01, zerosOnly = TRUE )
+
+
+sData_D1_saline <- wThreshold(sData_D1_saline)#,markers = some_markes,cutoff = 0.9,ttl =  "Neural cells drop-outs")
+```
+
+
+## Calculate disimilarity
+
+```{r}
+sData_D1_saline <- scDissim(sData_D1_saline)
+```
+
+
+### Calculate PCA
+
+```{r}
+sData_D1_saline <- scPCA(sData_D1_saline)
+```
+
+
+```{r}
+sData_D1_saline <- scCluster(sData_D1_saline,nPC = 3)
+Neuro_PCA_clustersColors <- colorRampPalette(rev(brewer.pal(n = 8, name ="Dark2")))( sData_D1_saline@nCluster ) 
+plot(sData_D1_saline@PC[,c(1,2)], pch=sData_D1_saline@clusters, main="CIDR", xlab="PC1", ylab="PC2", col= sData_D1_saline@clusters)
+```
+
+
+
+```{r}
+NAc_D1_CIDR_pos <- as.data.frame(sData_D1_saline@PC[,1:3])
+colnames(NAc_D1_CIDR_pos) <- paste0("PC",1:3)
+NAc_D1_CIDR_pos$cluster <- factor(sData_D1_saline@clusters)
+NAc_D1_CIDR_pos$type <- str_match(colnames(sData_D1_saline@nData), "(.+)_(.+)_(.+)" )[,3]
+
+plot_ly(NAc_D1_CIDR_pos, x= ~PC1, y=~PC2, z= ~PC3, color = ~ cluster, colors = "Dark2", marker=list(size=2))
+
+```
+
+
+
+
+## calculate tSNE
+
+```{r}
+NAc_D1_clustBased_sobj <- RunTSNE(NAc_D1_clustBased_sobj, dims.use = 1:5, do.fast = T,dim_embed = 3)
+```
+
+## TSNE plot
+
+```{r NAc_tSNE, fig.height=6, fig.width=8}
+NAc_D1_TypesCols <- ggsci::pal_d3(palette = "category20c")(length(levels(NAc_D1_clustBased_sobj@ident)))
+plt_NAc_D1_saline_original <- TSNEPlot(NAc_D1_clustBased_sobj, 
+                                   colors.use = NAc_D1_TypesCols,
+                                   do.return=T, dim.1 =2 , dim.2=3)
+plottSNEClustering(NAc_D1_clustBased_sobj, clustersColors = NAc_D1_TypesCols)
+```
+
+
+## Do clustering
+
+```{r, fig.height=6, fig.width=12}
+coclust <- doConcensusClustering(NAc_D1_clustBased_sobj)
+
+coclust2 <- coclust
+#coclust2[coclust2 <= 0.4] <- 0
+coclust_graph_trimed <- graph_from_adjacency_matrix(coclust2,mode = "undirected", weighted = TRUE)
+wc2 <- cluster_infomap(coclust_graph_trimed)
+members2 <- membership(wc2)
+
+members2[members2 ==10] <- 3
+
+
+
+NAc_D1_clustBased_sobj <- SetIdent(NAc_D1_clustBased_sobj, ident.use = as.numeric(members2))
+NAc_D1_clustBased_sobj=BuildClusterTree(NAc_D1_clustBased_sobj,do.plot=TRUE,do.reorder=FALSE)
+```
+
+
+
+```{r, fig.height=10, fig.width=10}
+#clustersColors = ggsci::pal_simpsons()(length(levels(NAc_D1_clustBased_sobj@ident)))
+#names(clustersColors) <- levels(NAc_D1_clustBased_sobj@ident)  
+
+if(length(levels(NAc_D1_clustBased_sobj@ident)) >20){
+  NAc_D1_TypesCols = ggsci::pal_d3(palette = "category20c")(20)
+  
+  n <- length(levels(NAc_D1_clustBased_sobj@ident)) - 20
+  NAc_D1_TypesCols <- c(NAc_D1_TypesCols, ggsci::pal_rickandmorty()(n))
+}else{
+  NAc_D1_TypesCols = ggsci::pal_d3(palette = "category20c")(length(levels(NAc_D1_clustBased_sobj@ident)))
+}
+
+names(NAc_D1_TypesCols) <- sort(levels(NAc_D1_clustBased_sobj@ident))
+
+pdf("results_NAc_D1_saline/D1_colustering.pdf",width = 15,height = 15)
+plotCoClustheatmap(NAc_D1_clustBased_sobj, coclust,NAc_D1_TypesCols)
+dev.off()
+```
+
+
+## Plot tSNE
+
+```{r, fig.height=8, fig.width=12}
+plottSNEClustering(NAc_D1_clustBased_sobj, NAc_D1_TypesCols)
+```
+
+
+```{r, fig.height=7, fig.width=12}
+NAc_neuro_D1_ClustersMarkers <- list()
+for(clus in levels(NAc_D1_clustBased_sobj@ident)){
+  message(paste("Processing cluster",clus))
+  NAc_neuro_D1_ClustersMarkers[[clus]] <- getMASTmarkers(NAc_D1_clustBased_sobj,clus)
+  NAc_neuro_D1_ClustersMarkers[[clus]]$pvalue <- as.numeric(as.character(NAc_neuro_D1_ClustersMarkers[[clus]]$pvalue))
+  NAc_neuro_D1_ClustersMarkers[[clus]]$log2FC <- as.numeric(as.character(NAc_neuro_D1_ClustersMarkers[[clus]]$log2FC))
+}
+
+```
+
+
+
+## Save all the objects in a directory 
+
+```{r}
+allObj <- ls()
+
+dir.create("20170710_R_session",showWarnings = FALSE)
+
+for(o in allObj){
+  
+  if(class(get(o)) != "function"){
+    fname <- paste0("20170710_R_session/",o,".RData")
+    message(paste("saving",o,"to",fname,"size:",object.size(get(o))))
+    save(list=o,file = fname)
+  }
+}
+
+```
+
+
+
+## Check the expression of GRM2 in our data
+
+```{r}
+
+tmp <- NAc_merged_sobj@data.info
+tmp$expr <- NAc_merged_sobj@data["Grm2",]
+
+ggplot(tmp, aes(x=L1_cluster, y=expr, fill=L1_cluster)) + geom_violin(scale = "width") + theme_bw() +
+  scale_fill_d3(palette = "category20c") + xlab("Cluster") + ylab("Grm2 expression") +
+  facet_grid(Sample~.)
+```
+
+
+
+## Order clusters
+
+```{r}
+idents <- as.character(NAc_merged_noSample5_sobj@ident)
+
+pos1 <- which(idents == "1")
+pos2 <- which(idents == "2")
+pos3 <- which(idents == "3")
+pos4 <- which(idents == "4")
+pos5 <- which(idents == "5")
+pos6 <- which(idents == "6")
+pos7 <- which(idents == "7")
+pos8 <- which(idents == "8")
+pos9 <- which(idents == "9")
+pos10 <- which(idents == "10")
+pos11 <- which(idents == "11")
+pos12 <- which(idents == "12")
+pos13 <- which(idents == "13")
+
+
+idents[pos13] <- "1"
+idents[pos12] <- "2"
+idents[pos10] <- "3"
+idents[pos11] <- "4"
+idents[pos1] <- "5"
+idents[pos2] <- "6"
+idents[pos3] <- "7"
+idents[pos9] <- "8"
+idents[pos8] <- "9"
+idents[pos7] <- "10"
+idents[pos6] <- "11"
+idents[pos5] <- "12"
+idents[pos4] <- "13"
+
+idents <- factor(idents,levels = as.character(1:13))
+
+NAc_merged_noSample5_sobj <- SetIdent(NAc_merged_noSample5_sobj,ident.use = idents)
+
+
+## change markers names 
+NAc_merged_ClustersMarkers <- NAc_merged_ClustersMarkers[c(13,12,10,11,1:3,9,8,7,6,5,4)]
+names(NAc_merged_ClustersMarkers) <- as.character(1:13)
+
+```
+
+
+```{r, fig.height=9, fig.width=12}
+
+samplesColors <- pal_d3(palette = "category20c")(length(levels(NAc_merged_noSample5_sobj@ident)))
+names(samplesColors) <- levels(NAc_merged_noSample5_sobj@ident)
+
+plottSNEClustering(NAc_merged_noSample5_sobj, clustersColors = samplesColors)
+
+```
+
+
+
+## Plot markers
+
+```{r}
+NAc_merged_makersName <- c()
+NAc_merge_markersClus <- c()
+for(i in levels(NAc_merged_noSample5_sobj@ident)){
+  print(paste("Processing cluster",i))
+  
+  sig <- subset(NAc_merged_ClustersMarkers[[i]],avg_diff > 2)
+  sig <- head(sig,10)
+  
+  mrks <- rownames(NAc_merged_ClustersMarkers[[i]])
+  mrks <- mrks[!is.na(mrks)]
+   
+  NAc_merged_makersName <- c(NAc_merged_makersName, mrks) 
+  NAc_merge_markersClus <- c(NAc_merge_markersClus, rep(i, length(mrks)))
+}
+
+
+#names(clusterCols) <- levels(NAc_merged_sobj@ident)
+
+
+General_clusters_markers  <- c("Cldn5","Flt1","Kcnj8","Gkn3","Ccdc153","Pdgfra","Cdo1",
+                               "Fyn","Bmp4","Mal","Mog","Klk6","Gja1","Aldoc","Car2","Aqp4",
+                               "Gfap","Ctss","C1qa","Cx3cr1","Mrc1","Snap25","Syt1","Arpp21",
+                               "Ppp1r1b","Tubb3","Dcx","Top2a","Tac1")
+
+
+png("results_NAc_all/NAc_clust_markers_orderedClusters.png",width = 1024,height =2048 )
+plotMarkersHeatmap(NAc_merged_noSample5_sobj,
+                   markers = General_clusters_markers, 
+                   clustersColors = samplesColors,
+                   #markerClusters = as.numeric(NAc_merge_markersClus), 
+                   clusterCols = FALSE)
+dev.off()
+
+
+
+NAc_merged_noSample5_sobj@data.info$type <- "Neuronal"
+NAc_merged_noSample5_sobj@data.info$type[NAc_merged_noSample5_sobj@ident %in% c(1:8)] <- "Non-neuronal"
+
+
+ggplot(NAc_merged_noSample5_sobj@data.info,aes(x=type,y=nGene,fill=type)) + geom_violin() +
+  theme_bw() + scale_fill_jco()
+```
+
+
+
